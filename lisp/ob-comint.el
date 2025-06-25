@@ -1,6 +1,6 @@
 ;;; ob-comint.el --- Babel Functions for Interaction with Comint Buffers -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2009-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2025 Free Software Foundation, Inc.
 
 ;; Author: Eric Schulte
 ;; Keywords: literate programming, reproducible research, comint
@@ -30,6 +30,10 @@
 ;; org-babel at large.
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
+
 (require 'ob-core)
 (require 'org-compat)
 (require 'comint)
@@ -54,15 +58,76 @@ executed inside the protection of `save-excursion' and
 	   (let ((comint-input-filter (lambda (_input) nil)))
 	     ,@body))))))
 
+(defvaralias 'org-babel-comint-prompt-regexp-old 'org-babel-comint-prompt-regexp-fallback)
+(defvar org-babel-comint-prompt-regexp-fallback nil
+  "Fallback regexp used to detect prompt.")
+
+(defcustom org-babel-comint-fallback-regexp-threshold 5.0
+  "Waiting time until trying to use fallback regexp to detect prompt.
+This is useful when prompt unexpectedly changes."
+  :type 'float
+  :group 'org-babel
+  :package-version '(Org . "9.7"))
+
+(defun org-babel-comint--set-fallback-prompt ()
+  "Swap `comint-prompt-regexp' and `org-babel-comint-prompt-regexp-fallback'."
+  (when org-babel-comint-prompt-regexp-fallback
+    (let ((tmp comint-prompt-regexp))
+      (setq comint-prompt-regexp org-babel-comint-prompt-regexp-fallback
+            org-babel-comint-prompt-regexp-fallback tmp))))
+
+(defun org-babel-comint--prompt-filter (string &optional prompt-regexp)
+  "Remove PROMPT-REGEXP from STRING.
+
+PROMPT-REGEXP defaults to `comint-prompt-regexp'."
+  (let* ((prompt-regexp (or prompt-regexp comint-prompt-regexp))
+         ;; We need newline in case if we do progressive replacement
+         ;; of agglomerated comint prompts with `comint-prompt-regexp'
+         ;; containing ^.
+         (separator "org-babel-comint--prompt-filter-separator\n"))
+    (while (string-match-p prompt-regexp string)
+      (setq string
+            (replace-regexp-in-string
+             (format "\\(?:%s\\)?\\(?:%s\\)[ \t]*" separator prompt-regexp)
+             separator string)))
+    (delete "" (split-string string separator))))
+
+(defun org-babel-comint--echo-filter (string &optional echo)
+  "Remove ECHO from STRING."
+  (and echo string
+       (string-match
+        (replace-regexp-in-string "\n" "[\r\n]+" (regexp-quote echo))
+        string)
+       (setq string (substring string (match-end 0))))
+  string)
+
+(defun org-babel-comint--remove-prompts-p (prompt-handling)
+  "Helper to decide whether to remove prompts from comint output.
+Parses the symbol in PROMPT-HANDLING, which can be
+`filter-prompts', in which case prompts should be removed; or
+`disable-prompt-filtering', in which case prompt filtering is
+skipped.  For backward-compatibility, the default value of `nil'
+is equivalent to `filter-prompts'."
+  (cond
+   ((eq prompt-handling 'disable-prompt-filtering) nil)
+   ((eq prompt-handling 'filter-prompts) t)
+   ((eq prompt-handling nil) t)
+   (t (error (format "Unrecognized prompt handling behavior %s"
+                     prompt-handling)))))
+
 (defmacro org-babel-comint-with-output (meta &rest body)
   "Evaluate BODY in BUFFER and return process output.
 Will wait until EOE-INDICATOR appears in the output, then return
 all process output.  If REMOVE-ECHO and FULL-BODY are present and
-non-nil, then strip echo'd body from the returned output.  META
-should be a list containing the following where the last two
-elements are optional.
+non-nil, then strip echo'd body from the returned output.
+PROMPT-HANDLING may be either of the symbols `filter-prompts', in
+which case the output is split by `comint-prompt-regexp' and
+returned as a list; or, `disable-prompt-filtering', which
+suppresses this behavior and returns the full output as a string.
+META should be a list containing the following where the last
+three elements are optional.
 
- (BUFFER EOE-INDICATOR REMOVE-ECHO FULL-BODY)
+ (BUFFER EOE-INDICATOR REMOVE-ECHO FULL-BODY PROMPT-HANDLING)
 
 This macro ensures that the filter is removed in case of an error
 or user `keyboard-quit' during execution of body."
@@ -70,14 +135,16 @@ or user `keyboard-quit' during execution of body."
   (let ((buffer (nth 0 meta))
 	(eoe-indicator (nth 1 meta))
 	(remove-echo (nth 2 meta))
-	(full-body (nth 3 meta)))
+	(full-body (nth 3 meta))
+        (prompt-handling (nth 4 meta)))
     `(org-babel-comint-in-buffer ,buffer
        (let* ((string-buffer "")
 	      (comint-output-filter-functions
-	       (cons (lambda (text) (setq string-buffer (concat string-buffer text)))
+	       (cons (lambda (text)
+                       (setq string-buffer (concat string-buffer text)))
 		     comint-output-filter-functions))
 	      dangling-text)
-	 ;; got located, and save dangling text
+         ;; got located, and save dangling text
 	 (goto-char (process-mark (get-buffer-process (current-buffer))))
 	 (let ((start (point))
 	       (end (point-max)))
@@ -86,26 +153,38 @@ or user `keyboard-quit' during execution of body."
 	 ;; pass FULL-BODY to process
 	 ,@body
 	 ;; wait for end-of-evaluation indicator
-	 (while (progn
-		  (goto-char comint-last-input-end)
-		  (not (save-excursion
-			 (and (re-search-forward
-			       (regexp-quote ,eoe-indicator) nil t)
-			      (re-search-forward
-			       comint-prompt-regexp nil t)))))
-	   (accept-process-output (get-buffer-process (current-buffer))))
+         (let ((start-time (current-time)))
+	   (while (not (save-excursion
+		         (and (string-match
+			       (regexp-quote ,eoe-indicator) string-buffer)
+			      (string-match
+			       comint-prompt-regexp string-buffer))))
+	     (accept-process-output
+              (get-buffer-process (current-buffer))
+              org-babel-comint-fallback-regexp-threshold)
+             (when (and org-babel-comint-prompt-regexp-fallback
+                        (> (float-time (time-since start-time))
+                           org-babel-comint-fallback-regexp-threshold)
+                        (progn
+		          (goto-char comint-last-input-end)
+		          (save-excursion
+                            (and
+                             (string-match
+			      (regexp-quote ,eoe-indicator) string-buffer)
+			     (string-match
+                              org-babel-comint-prompt-regexp-fallback string-buffer)))))
+               (org-babel-comint--set-fallback-prompt))))
 	 ;; replace cut dangling text
-	 (goto-char (process-mark (get-buffer-process (current-buffer))))
+         (goto-char (process-mark (get-buffer-process (current-buffer))))
 	 (insert dangling-text)
 
-	 ;; remove echo'd FULL-BODY from input
-	 (when (and ,remove-echo ,full-body
-		    (string-match
-		     (replace-regexp-in-string
-		      "\n" "[\r\n]+" (regexp-quote (or ,full-body "")))
-		     string-buffer))
-	   (setq string-buffer (substring string-buffer (match-end 0))))
-	 (split-string string-buffer comint-prompt-regexp)))))
+         ;; remove echo'd FULL-BODY from input
+         (and ,remove-echo ,full-body
+              (setq string-buffer (org-babel-comint--echo-filter string-buffer ,full-body)))
+
+         (if (org-babel-comint--remove-prompts-p ,prompt-handling)
+             (org-babel-comint--prompt-filter string-buffer)
+           string-buffer)))))
 
 (defun org-babel-comint-input-command (buffer cmd)
   "Pass CMD to BUFFER.
@@ -121,11 +200,23 @@ The input will not be echoed."
 Note: this is only safe when waiting for the result of a single
 statement (not large blocks of code)."
   (org-babel-comint-in-buffer buffer
-    (while (progn
-             (goto-char comint-last-input-end)
-             (not (and (re-search-forward comint-prompt-regexp nil t)
-                     (goto-char (match-beginning 0)))))
-      (accept-process-output (get-buffer-process buffer)))))
+    (let ((start-time (current-time)))
+      (while (progn
+               (goto-char comint-last-input-end)
+               (not (and (re-search-forward comint-prompt-regexp nil t)
+                       (goto-char (match-beginning 0)))))
+        (accept-process-output
+         (get-buffer-process buffer)
+         org-babel-comint-fallback-regexp-threshold)
+        (when (and org-babel-comint-prompt-regexp-fallback
+                   (> (float-time (time-since start-time))
+                      org-babel-comint-fallback-regexp-threshold)
+                   (progn
+		     (goto-char comint-last-input-end)
+		     (save-excursion
+		       (re-search-forward
+                        org-babel-comint-prompt-regexp-fallback nil t))))
+          (org-babel-comint--set-fallback-prompt))))))
 
 (defun org-babel-comint-eval-invisibly-and-wait-for-file
     (buffer file string &optional period)
@@ -164,12 +255,15 @@ source block, and the name of the temp file.")
 (defvar-local org-babel-comint-async-chunk-callback nil
   "Callback function to clean Babel async output results before insertion.
 Its single argument is a string consisting of output from the
-comint process.  It should return a string that will be be passed
+comint process.  It should return a string that will be passed
 to `org-babel-insert-result'.")
 
+(defvar-local org-babel-comint-async-remove-prompts-p t
+  "Whether prompts should be detected and removed from async output.")
+
 (defvar-local org-babel-comint-async-dangling nil
-  "Dangling piece of the last process output, in case
-`org-babel-comint-async-indicator' is spread across multiple
+  "Dangling piece of the last process output, as a string.
+Used when `org-babel-comint-async-indicator' is spread across multiple
 comint outputs due to buffering.")
 
 (defun org-babel-comint-use-async (params)
@@ -197,6 +291,8 @@ STRING contains the output originally inserted into the comint buffer."
 	 (file-callback org-babel-comint-async-file-callback)
 	 (combined-string (concat org-babel-comint-async-dangling string))
 	 (new-dangling combined-string)
+         ;; Assumes comint filter called with session buffer current
+         (session-dir default-directory)
 	 ;; list of UUID's matched by `org-babel-comint-async-indicator'
 	 uuid-list)
     (with-temp-buffer
@@ -221,7 +317,8 @@ STRING contains the output originally inserted into the comint buffer."
                                 (let* ((info (org-babel-get-src-block-info))
                                        (params (nth 2 info))
                                        (result-params
-                                        (cdr (assq :result-params params))))
+                                        (cdr (assq :result-params params)))
+                                       (default-directory session-dir))
                                   (org-babel-insert-result
                                    (funcall file-callback
                                             (nth
@@ -244,16 +341,23 @@ STRING contains the output originally inserted into the comint buffer."
 		   (res-str-raw
 		    (buffer-substring
 		     ;; move point to beginning of indicator
-                     (- (match-beginning 0) 1)
+                     (match-beginning 0)
 		     ;; find the matching start indicator
 		     (cl-loop
                       do (re-search-backward indicator)
 		      until (and (equal (match-string 1) "start")
 				 (equal (match-string 2) uuid))
 		      finally return (+ 1 (match-end 0)))))
-		   ;; Apply callback to clean up the result
+		   ;; Apply user callback
 		   (res-str (funcall org-babel-comint-async-chunk-callback
-                                     res-str-raw)))
+                                     (if org-babel-comint-async-remove-prompts-p
+                                         (org-trim (string-join
+                                                    (mapcar #'org-trim
+                                                            (org-babel-comint--prompt-filter
+                                                             res-str-raw))
+                                                    "\n")
+                                                   t)
+                                       res-str-raw))))
 	      ;; Search for uuid in associated org-buffers to insert results
 	      (cl-loop for buf in org-buffers
 		       until (with-current-buffer buf
@@ -264,7 +368,8 @@ STRING contains the output originally inserted into the comint buffer."
                                    (let* ((info (org-babel-get-src-block-info))
                                           (params (nth 2 info))
                                           (result-params
-                                           (cdr (assq :result-params params))))
+                                           (cdr (assq :result-params params)))
+                                          (default-directory session-dir))
 				     (org-babel-insert-result
                                       res-str result-params info))
 				   t))))
@@ -273,18 +378,26 @@ STRING contains the output originally inserted into the comint buffer."
 
 (defun org-babel-comint-async-register
     (session-buffer org-buffer indicator-regexp
-		    chunk-callback file-callback)
+		    chunk-callback file-callback
+                    &optional prompt-handling)
   "Set local org-babel-comint-async variables in SESSION-BUFFER.
 ORG-BUFFER is added to `org-babel-comint-async-buffers' if not
 present.  `org-babel-comint-async-indicator',
 `org-babel-comint-async-chunk-callback', and
 `org-babel-comint-async-file-callback' are set to
-INDICATOR-REGEXP, CHUNK-CALLBACK, and FILE-CALLBACK
-respectively."
+INDICATOR-REGEXP, CHUNK-CALLBACK, and FILE-CALLBACK respectively.
+PROMPT-HANDLING may be either of the symbols `filter-prompts', in
+which case prompts matching `comint-prompt-regexp' are filtered
+from output before it is passed to CHUNK-CALLBACK, or
+`disable-prompt-filtering', in which case this behavior is
+disabled.  For backward-compatibility, the default value of `nil'
+is equivalent to `filter-prompts'."
   (org-babel-comint-in-buffer session-buffer
     (setq org-babel-comint-async-indicator indicator-regexp
 	  org-babel-comint-async-chunk-callback chunk-callback
 	  org-babel-comint-async-file-callback file-callback)
+    (setq org-babel-comint-async-remove-prompts-p
+          (org-babel-comint--remove-prompts-p prompt-handling))
     (unless (memq org-buffer org-babel-comint-async-buffers)
       (setq org-babel-comint-async-buffers
 	    (cons org-buffer org-babel-comint-async-buffers)))

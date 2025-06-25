@@ -1,6 +1,6 @@
 ;;; oc-biblatex.el --- biblatex citation processor for Org  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2021-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2021-2025 Free Software Foundation, Inc.
 
 ;; Author: Nicolas Goaziou <mail@nicolasgoaziou.fr>
 
@@ -26,7 +26,7 @@
 
 ;; The processor relies on "biblatex" LaTeX package.  As such it ensures that
 ;; the package is properly required in the document's preamble.  More
-;; accurately, it will re-use any "\usepackage{biblatex}" already present in
+;; accurately, it will reuse any "\usepackage{biblatex}" already present in
 ;; the document (e.g., through `org-latex-packages-alist'), or insert one using
 ;; options defined in `org-cite-biblatex-options'.
 
@@ -62,11 +62,16 @@
 ;;    #+print_bibliography: :keyword abc,xyz :title "Primary Sources"
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
+
 (require 'map)
 (require 'org-macs)
 (require 'oc)
 
-(declare-function org-element-property "org-element" (property element))
+(declare-function org-element-property "org-element-ast" (property node))
+(declare-function org-element-parent "org-element-ast" (node))
 (declare-function org-export-data "org-export" (data info))
 
 
@@ -174,7 +179,7 @@ a style in `org-cite-biblatex-styles'."
           (cons :tag "Shortcut"
                 (string :tag "Name")
                 (string :tag "Full name")))
-  :safe t)
+  :safe #'listp)
 
 
 ;;; Internal functions
@@ -185,20 +190,23 @@ INITIAL is an initial style of comma-separated options, as a string or nil.
 STYLE is the style definition as a string or nil.
 
 Return a string."
-  (let ((options-no-style
-         (and initial
-              (let ((re (rx string-start (or "bibstyle" "citestyle" "style"))))
-                (seq-filter
-                 (lambda (option) (not (string-match re option)))
-                 (split-string (org-unbracket-string "[" "]" initial)
-                               "," t " \t")))))
-        (style-options
-         (cond
-          ((null style) nil)
-          ((not (string-match "/" style)) (list (concat "style=" style)))
-          (t
-           (list (concat "bibstyle=" (substring style nil (match-beginning 0)))
-                 (concat "citestyle=" (substring style (match-end 0))))))))
+  (let* ((options-no-style
+          (and initial
+               (let ((re (rx string-start (or "bibstyle" "citestyle" "style"))))
+                 (seq-filter
+                  (lambda (option) (not (string-match re option)))
+                  (split-string (org-unbracket-string "[" "]" initial)
+                                "," t " \t")))))
+         ;; Check whether the string is in key=val,...
+         (biblatex-options-p (and (stringp style) (string-match-p "\\`[^,=]+=[^,]+\\(,[^=]+=[^,]+\\)\\'" style)))
+         (style-options
+          (cond
+           ((null style) nil)
+           ;; Assume it is a valid options string for biblatex if it is in key=val,... format
+           ((not (string-match "/" style)) (list (if biblatex-options-p style (concat "style=" style))))
+           (t
+            (list (concat "bibstyle=" (substring style nil (match-beginning 0)))
+                  (concat "citestyle=" (substring style (match-end 0))))))))
     (if (or options-no-style style-options)
         (format "[%s]"
                 (mapconcat #'identity
@@ -227,7 +235,7 @@ When NO-OPT argument is non-nil, only provide mandatory arguments."
       (let* ((origin (pcase references
                        (`(,reference) reference)
                        (`(,reference . ,_)
-                        (org-element-property :parent reference))))
+                        (org-element-parent reference))))
              (suffix (org-element-property :suffix origin))
              (prefix (org-element-property :prefix origin)))
         (concat (and prefix
@@ -371,61 +379,47 @@ INFO is the export state, as a property list."
        (other
         (user-error "Invalid entry %S in `org-cite-biblatex-styles'" other))))))
 
-(defun org-cite-biblatex-prepare-preamble (output _keys files style &rest _)
-  "Prepare document preamble for \"biblatex\" usage.
+(defun org-cite-biblatex--generate-latex-usepackage (info)
+  "Ensure that the biblatex package is loaded.
+This is performed by extracting relevant information from the
+INFO export plist, and modifying any existing
+\\usepackage{biblatex} statement in the LaTeX header."
+  (let ((style (org-cite-bibliography-style info))
+        (usepackage-rx (rx "\\usepackage"
+                           (opt (group "[" (*? anything) "]"))
+                           "{biblatex}")))
+    (concat
+     (if (string-match usepackage-rx (plist-get info :latex-full-header))
+         ;; "biblatex" package loaded, but with none (or different) options.
+         ;; Replace with style-including command.
+         (plist-put info :latex-full-header
+                    (replace-match
+                     (format "\\usepackage%s{biblatex}"
+                             (save-match-data
+                               (org-cite-biblatex--package-options nil style)))
+                     t t
+                     (plist-get info :latex-full-header)))
+       ;; No "biblatex" package loaded.  Insert "usepackage" command
+       ;; with appropriate options, including style.
+       (format "\\usepackage%s{biblatex}\n"
+               (org-cite-biblatex--package-options
+                org-cite-biblatex-options style))))))
 
-OUTPUT is the final output of the export process.  FILES is the list of file
-names used as the bibliography.
-
-This function ensures \"biblatex\" package is required.  It also adds resources
-to the document, and set styles."
-  (with-temp-buffer
-    (save-excursion (insert output))
-    (when (search-forward "\\begin{document}" nil t)
-      ;; Ensure there is a \usepackage{biblatex} somewhere or add one.
-      ;; Then set options.
-      (goto-char (match-beginning 0))
-      (let ((re (rx "\\usepackage"
-                    (opt (group "[" (*? anything) "]"))
-                    "{biblatex}")))
-        (cond
-         ;; No "biblatex" package loaded.  Insert "usepackage" command
-         ;; with appropriate options, including style.
-         ((not (re-search-backward re nil t))
-          (save-excursion
-            (insert
-             (format "\\usepackage%s{biblatex}\n"
-                     (org-cite-biblatex--package-options
-                      org-cite-biblatex-options style)))))
-         ;; "biblatex" package loaded, but without any option.
-         ;; Include style only.
-         ((not (match-beginning 1))
-          (search-forward "{" nil t)
-          (insert (org-cite-biblatex--package-options nil style)))
-         ;; "biblatex" package loaded with some options set.  Override
-         ;; style-related options with ours.
-         (t
-          (replace-match
-           (save-match-data
-             (org-cite-biblatex--package-options (match-string 1) style))
-           nil nil nil 1))))
-      ;; Insert resources below.
-      (forward-line)
-      (insert (mapconcat (lambda (f)
-                           (format "\\addbibresource%s{%s}"
-                                   (if (org-url-p f) "[location=remote]" "")
-                                   f))
-                         files
-                         "\n")
-              "\n"))
-    (buffer-string)))
+(defun org-cite-biblatex--generate-latex-bibresources (info)
+  "From INFO generate LaTeX that loads the relevant bibliography resource files."
+  (let ((files (plist-get info :bibliography)))
+    (mapconcat (lambda (f)
+                 (format "\\addbibresource%s{%s}"
+                         (if (org-url-p f) "[location=remote]" "")
+                         f))
+               files
+               "\n")))
 
 
 ;;; Register `biblatex' processor
 (org-cite-register-processor 'biblatex
   :export-bibliography #'org-cite-biblatex-export-bibliography
   :export-citation #'org-cite-biblatex-export-citation
-  :export-finalizer #'org-cite-biblatex-prepare-preamble
   :cite-styles #'org-cite-biblatex-list-styles)
 
 (provide 'oc-biblatex)

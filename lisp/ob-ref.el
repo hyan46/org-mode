@@ -1,6 +1,6 @@
 ;;; ob-ref.el --- Babel Functions for Referencing External Data -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2009-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2025 Free Software Foundation, Inc.
 
 ;; Authors: Eric Schulte
 ;;	 Dan Davison
@@ -49,14 +49,19 @@
 ;;  #+end_src
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
+
 (require 'ob-core)
 (require 'org-macs)
 (require 'cl-lib)
 
-(declare-function org-babel-lob-get-info "ob-lob" (&optional datum))
+(declare-function org-babel-lob-get-info "ob-lob" (&optional datum no-eval))
 (declare-function org-element-at-point "org-element" (&optional pom cached-only))
-(declare-function org-element-property "org-element" (property element))
-(declare-function org-element-type "org-element" (element))
+(declare-function org-element-property "org-element-ast" (property node))
+(declare-function org-element-post-affiliated "org-element" (node))
+(declare-function org-element-type "org-element-ast" (node &optional anonymous))
 (declare-function org-end-of-meta-data "org" (&optional full))
 (declare-function org-find-property "org" (property &optional value))
 (declare-function org-id-find-id-file "org-id" (id))
@@ -124,12 +129,14 @@ Emacs Lisp representation of the value of the variable."
       (save-excursion
 	(let ((case-fold-search t)
 	      args new-refere new-header-args new-referent split-file split-ref
-	      index)
+	      index contents)
 	  ;; if ref is indexed grab the indices -- beware nested indices
-	  (when (and (string-match "\\[\\([^\\[]+\\)\\]$" ref)
+	  (when (and (string-match "\\[\\([^\\[]*\\)\\]$" ref)
 		     (let ((str (substring ref 0 (match-beginning 0))))
 		       (= (cl-count ?\( str) (cl-count ?\) str))))
-	    (setq index (match-string 1 ref))
+            (if (> (length (match-string 1 ref)) 0)
+	        (setq index (match-string 1 ref))
+              (setq contents t))
 	    (setq ref (substring ref 0 (match-beginning 0))))
 	  ;; assign any arguments to pass to source block
 	  (when (string-match
@@ -149,8 +156,9 @@ Emacs Lisp representation of the value of the variable."
 	  (when (string-match "^\\(.+\\):\\(.+\\)$" ref)
 	    (setq split-file (match-string 1 ref))
 	    (setq split-ref (match-string 2 ref))
-	    (find-file split-file)
-	    (setq ref split-ref))
+            (when (file-exists-p split-file)
+	      (find-file split-file)
+	      (setq ref split-ref)))
 	  (org-with-wide-buffer
 	   (goto-char (point-min))
 	   (let* ((params (append args '((:results . "none"))))
@@ -165,13 +173,13 @@ Emacs Lisp representation of the value of the variable."
 			 (let ((e (org-element-at-point)))
 			   (when (equal (org-element-property :name e) ref)
 			     (goto-char
-			      (org-element-property :post-affiliated e))
+			      (org-element-post-affiliated e))
 			     (pcase (org-element-type e)
 			       (`babel-call
 				(throw :found
 				       (org-babel-execute-src-block
 					nil (org-babel-lob-get-info e) params)))
-			       (`src-block
+			       ((and `src-block (guard (not contents)))
 				(throw :found
 				       (org-babel-execute-src-block
 					nil nil
@@ -193,7 +201,7 @@ Emacs Lisp representation of the value of the variable."
 				(org-babel-execute-src-block nil info params))))
 		     (error "Reference `%s' not found in this buffer" ref))))
 	     (cond
-	      ((symbolp result) (format "%S" result))
+	      ((and result (symbolp result)) (format "%S" result))
 	      ((and index (listp result))
 	       (org-babel-ref-index-list index result))
 	      (t result)))))))))

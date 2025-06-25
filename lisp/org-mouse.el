@@ -1,6 +1,6 @@
 ;;; org-mouse.el --- Better mouse support for Org -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2006-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2006-2025 Free Software Foundation, Inc.
 
 ;; Author: Piotr Zielinski <piotr dot zielinski at gmail dot com>
 ;; Maintainer: Carsten Dominik <carsten.dominik@gmail.com>
@@ -136,6 +136,9 @@
 
 ;;; Code:
 
+(require 'org-macs)
+(org-assert-version)
+
 (require 'org)
 (require 'cl-lib)
 
@@ -182,9 +185,9 @@ Changing this variable requires a restart of Emacs to get activated."
 	      (const :tag "Activate checkboxes" activate-checkboxes)))
 
 (defun org-mouse-re-search-line (regexp)
-  "Search the current line for a given regular expression."
-  (beginning-of-line)
-  (re-search-forward regexp (point-at-eol) t))
+  "Search the current line for a given regular expression REGEXP."
+  (forward-line 0)
+  (re-search-forward regexp (line-end-position) t))
 
 (defun org-mouse-end-headline ()
   "Go to the end of current headline (ignoring tags)."
@@ -208,7 +211,11 @@ this function is called.  Otherwise, the current major mode menu is used."
   (interactive "@e \nP")
   (if (and (= (event-click-count event) 1)
 	   (or (not mark-active)
-	       (sit-for (/ double-click-time 1000.0))))
+               (sit-for
+                (/ (if (fboundp 'mouse-double-click-time) ; Emacs >= 29
+                       (mouse-double-click-time)
+                     double-click-time)
+                   1000.0))))
       (progn
 	(select-window (posn-window (event-start event)))
 	(when (not (org-mouse-mark-active))
@@ -234,14 +241,14 @@ return `:middle'."
    (t :middle)))
 
 (defun org-mouse-empty-line ()
-  "Return non-nil iff the line contains only white space."
-  (save-excursion (beginning-of-line) (looking-at "[ \t]*$")))
+  "Return non-nil if the line contains only white space."
+  (save-excursion (forward-line 0) (looking-at "[ \t]*$")))
 
 (defun org-mouse-next-heading ()
   "Go to the next heading.
 If there is none, ensure that the point is at the beginning of an empty line."
   (unless (outline-next-heading)
-    (beginning-of-line)
+    (forward-line 0)
     (unless (org-mouse-empty-line)
       (end-of-line)
       (newline))))
@@ -254,7 +261,7 @@ insert the new heading before the current line.  Otherwise, insert it
 after the current heading."
   (interactive)
   (cl-case (org-mouse-line-position)
-    (:beginning (beginning-of-line)
+    (:beginning (forward-line 0)
 		(org-insert-heading))
     (t (org-mouse-next-heading)
        (org-insert-heading))))
@@ -264,7 +271,7 @@ after the current heading."
 
 For the acceptable UNITS, see `org-timestamp-change'."
   (interactive)
-  (org-time-stamp nil)
+  (org-timestamp nil)
   (when shift (org-timestamp-change shift units)))
 
 (defun org-mouse-keyword-menu (keywords function &optional selected itemformat)
@@ -276,7 +283,7 @@ keyword as the only argument.
 
 If SELECTED is nil, then all items are normal menu items.  If
 SELECTED is a function, then each item is a checkbox, which is
-enabled for a given keyword iff (funcall SELECTED keyword) return
+enabled for a given keyword if (funcall SELECTED keyword) return
 non-nil.  If SELECTED is neither nil nor a function, then the
 items are radio buttons.  A radio button is enabled for the
 keyword `equal' to SELECTED.
@@ -419,13 +426,14 @@ SCHEDULED: or DEADLINE: or ANYTHINGLIKETHIS:"
   (append
    (let ((tags (org-get-tags nil t)))
      (org-mouse-keyword-menu
-      (sort (mapcar #'car (org-get-buffer-tags)) #'string-lessp)
+      (sort (mapcar #'car (org-get-buffer-tags))
+            (or org-tags-sort-function #'org-string<))
       (lambda (tag)
 	(org-mouse-set-tags
 	 (sort (if (member tag tags)
 		   (delete tag tags)
 		 (cons tag tags))
-	       #'string-lessp)))
+	       (or org-tags-sort-function #'org-string<))))
       (lambda (tag) (member tag tags))
       ))
    '("--"
@@ -466,7 +474,7 @@ SCHEDULED: or DEADLINE: or ANYTHINGLIKETHIS:"
 				    (sort (if (member ',name ',options)
 					      (delete ',name ',options)
 					    (cons ',name ',options))
-					  'string-lessp)
+					  #'org-string<)
 				    " ")
 			 nil nil nil 1)
 			(when (functionp ',function) (funcall ',function)))
@@ -495,7 +503,8 @@ SCHEDULED: or DEADLINE: or ANYTHINGLIKETHIS:"
      ["Check TODOs" org-show-todo-tree t]
      ("Check Tags"
       ,@(org-mouse-keyword-menu
-	 (sort (mapcar #'car (org-get-buffer-tags)) #'string-lessp)
+	 (sort (mapcar #'car (org-get-buffer-tags))
+               (or org-tags-sort-function #'org-string<))
          (lambda (tag) (org-tags-sparse-tree nil tag)))
       "--"
       ["Custom Tag ..." org-tags-sparse-tree t])
@@ -505,7 +514,8 @@ SCHEDULED: or DEADLINE: or ANYTHINGLIKETHIS:"
      ["Display TODO List" org-todo-list t]
      ("Display Tags"
       ,@(org-mouse-keyword-menu
-	 (sort (mapcar #'car (org-get-buffer-tags)) #'string-lessp)
+	 (sort (mapcar #'car (org-get-buffer-tags))
+               (or org-tags-sort-function #'org-string<))
          (lambda (tag) (org-tags-view nil tag)))
       "--"
       ["Custom Tag ..." org-tags-view t])
@@ -551,7 +561,7 @@ SCHEDULED: or DEADLINE: or ANYTHINGLIKETHIS:"
       (save-excursion (org-apply-on-list wrap-fun nil)))))
 
 (defun org-mouse-bolp ()
-  "Return true if there only spaces, tabs, and `*' before point.
+  "Return non-nil if there only spaces, tabs, and `*' before point.
 This means, between the beginning of line and the point."
   (save-excursion
     (skip-chars-backward " \t*") (bolp)))
@@ -559,7 +569,7 @@ This means, between the beginning of line and the point."
 (defun org-mouse-insert-item (text)
   (cl-case (org-mouse-line-position)
     (:beginning				; insert before
-     (beginning-of-line)
+     (forward-line 0)
      (looking-at "[ \t]*")
      (open-line 1)
      (indent-to-column (- (match-end 0) (match-beginning 0)))
@@ -571,11 +581,11 @@ This means, between the beginning of line and the point."
      (insert "+ "))
     (:end				; insert text here
      (skip-chars-backward " \t")
-     (kill-region (point) (point-at-eol))
+     (kill-region (point) (line-end-position))
      (unless (looking-back org-mouse-punctuation (line-beginning-position))
        (insert (concat org-mouse-punctuation " ")))))
   (insert text)
-  (beginning-of-line))
+  (forward-line 0))
 
 (advice-add 'dnd-insert-text :around #'org--mouse-dnd-insert-text)
 (defun org--mouse-dnd-insert-text (orig-fun window action text &rest args)
@@ -617,7 +627,7 @@ This means, between the beginning of line and the point."
 	   ["Sparse Tree" (org-occur ',region-string)]
 	   ["Find in Buffer" (occur ',region-string)]
 	   ["Grep in Current Dir"
-	    (grep (format "grep -rnH -e '%s' *" ',region-string))]
+	    (grep (format "grep -rnH -e '%s' ./*" ',region-string))]
 	   ["Grep in Parent Dir"
 	    (grep (format "grep -rnH -e '%s' ../*" ',region-string))]
 	   "--"
@@ -625,7 +635,7 @@ This means, between the beginning of line and the point."
 	    (progn (save-excursion (goto-char (region-beginning)) (insert "[["))
 		   (save-excursion (goto-char (region-end)) (insert "]]")))]
 	   ["Insert Link Here" (org-mouse-yank-link ',event)]))))
-     ((save-excursion (beginning-of-line) (looking-at "[ \t]*#\\+STARTUP: \\(.*\\)"))
+     ((save-excursion (forward-line 0) (looking-at "[ \t]*#\\+STARTUP: \\(.*\\)"))
       (popup-menu
        `(nil
 	 ,@(org-mouse-list-options-menu (mapcar #'car org-startup-options)
@@ -706,7 +716,7 @@ This means, between the beginning of line and the point."
       (popup-menu
        '(nil
 	 ["Show Day" org-open-at-point t]
-	 ["Change Timestamp" org-time-stamp t]
+	 ["Change Timestamp" org-timestamp t]
 	 ["Delete Timestamp" (org-mouse-delete-timestamp) t]
 	 ["Compute Time Range" org-evaluate-time-range (org-at-date-range-p)]
 	 "--"
@@ -816,8 +826,8 @@ This means, between the beginning of line and the point."
 	    :active (not (save-excursion
 			   (org-mouse-re-search-line org-scheduled-regexp)))]
 	   ["Insert Timestamp"
-	    (progn (org-mouse-end-headline) (insert " ") (org-time-stamp nil)) t]
-					;	 ["Timestamp (inactive)" org-time-stamp-inactive t]
+	    (progn (org-mouse-end-headline) (insert " ") (org-timestamp nil)) t]
+					;	 ["Timestamp (inactive)" org-timestamp-inactive t]
 	   "--"
 	   ["Archive Subtree" org-archive-subtree]
 	   ["Cut Subtree"  org-cut-special]
@@ -852,6 +862,10 @@ This means, between the beginning of line and the point."
 	       (org-mouse-in-region-p (posn-point (event-start event))))
     (mouse-drag-region event)))
 
+;; This function conflicts with touch screen gestures as it relays
+;; events to `mouse-drag-region'.
+(put 'org-mouse-down-mouse 'ignored-mouse-command t)
+
 (add-hook 'org-mode-hook
           (lambda ()
             (setq org-mouse-context-menu-function #'org-mouse-context-menu)
@@ -873,7 +887,7 @@ This means, between the beginning of line and the point."
             (when (memq 'activate-stars org-mouse-features)
               (font-lock-add-keywords
                nil
-               `((,org-outline-regexp
+               `((,org-outline-regexp-bol
                   0 `(face org-link mouse-face highlight keymap ,org-mouse-map)
                   'prepend))
                t))
@@ -968,8 +982,8 @@ This means, between the beginning of line and the point."
   (interactive)
   (org-back-to-heading)
   (let ((minlevel 1000)
-	(replace-text (concat (match-string 0) "* ")))
-    (beginning-of-line 2)
+	(replace-text (concat (make-string (org-current-level) ?*) "* ")))
+    (forward-line 1)
     (save-excursion
       (while (not (or (eobp) (looking-at org-outline-regexp)))
 	(when (looking-at org-mouse-plain-list-regexp)
@@ -986,7 +1000,7 @@ This means, between the beginning of line and the point."
 (defun org-mouse-do-remotely (command)
   ;;  (org-agenda-check-no-diary)
   (when (get-text-property (point) 'org-marker)
-    (let* ((anticol (- (point-at-eol) (point)))
+    (let* ((anticol (- (line-end-position) (point)))
 	   (marker (get-text-property (point) 'org-marker))
 	   (buffer (marker-buffer marker))
 	   (pos (marker-position marker))
@@ -1010,14 +1024,14 @@ This means, between the beginning of line and the point."
 		     (org-fold-heading nil)))   ; show the next heading
 	      (org-back-to-heading)
 	      (setq marker (point-marker))
-	      (goto-char (max (point-at-bol) (- (point-at-eol) anticol)))
+              (goto-char (max (line-beginning-position) (- (line-end-position) anticol)))
 	      (funcall command)
 	      (message "_cmd: %S" org-mouse-cmd)
 	      (message "this-command: %S" this-command)
 	      (unless (eq (marker-position marker) (marker-position endmarker))
 		(setq newhead (org-get-heading))))
 
-	    (beginning-of-line 1)
+	    (forward-line 1)
 	    (save-excursion
 	      (org-agenda-change-all-lines newhead hdmarker 'fixface))))
 	t))))

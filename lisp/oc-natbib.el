@@ -1,6 +1,6 @@
 ;;; oc-natbib.el --- Citation processor using natbib LaTeX package  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2021-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2021-2025 Free Software Foundation, Inc.
 
 ;; Author: Nicolas Goaziou <mail@nicolasgoaziou.fr>
 
@@ -42,9 +42,13 @@
 ;; Bibliography accepts any style supported by "natbib" package.
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
+
 (require 'oc)
 
-(declare-function org-element-property "org-element" (property element))
+(declare-function org-element-property "org-element-ast" (property node))
 
 (declare-function org-export-data "org-export" (data info))
 
@@ -72,6 +76,15 @@ If \"natbib\" package is already required in the document, e.g., through
     (const :tag "display full author list on first citation, abbreviate the others" longnamesfirst)
     (const :tag "redefine \\thebibliography to issue \\section* instead of \\chapter*" sectionbib)
     (const :tag "keep all the authors' names in a citation on one line" nonamebreak)))
+
+(defcustom org-cite-natbib-bibliography-style 'unsrtnat
+  "Default bibliography style."
+  :group 'org-cite
+  :package-version '(Org . "9.7")
+  :type
+  '(choice
+    (const unsrtnat)
+    (symbol :tag "Other")))
 
 
 ;;; Internal functions
@@ -139,11 +152,13 @@ CITATION is the citation object.  INFO is the export state, as a property list."
   "Print references from bibliography FILES.
 FILES is a list of absolute file names.  STYLE is the bibliography style, as
 a string or nil."
-  (concat (and style (format "\\bibliographystyle{%s}\n" style))
-          (format "\\bibliography{%s}"
-                  (mapconcat #'file-name-sans-extension
-                             files
-                             ","))))
+  (concat
+   (format "\\bibliographystyle{%s}\n"
+           (or style org-cite-natbib-bibliography-style))
+   (format "\\bibliography{%s}"
+           (mapconcat #'file-name-sans-extension
+                      files
+                      ","))))
 
 (defun org-cite-natbib-export-citation (citation style _ info)
   "Export CITATION object.
@@ -153,32 +168,25 @@ state, as a property list."
           (org-cite-natbib--build-optional-arguments citation info)
           (org-cite-natbib--build-arguments citation)))
 
-(defun org-cite-natbib-use-package (output &rest _)
-  "Ensure output requires \"natbib\" package.
-OUTPUT is the final output of the export process."
-  (with-temp-buffer
-    (save-excursion (insert output))
-    (when (search-forward "\\begin{document}" nil t)
-      ;; Ensure there is a \usepackage{natbib} somewhere or add one.
-      (goto-char (match-beginning 0))
-      (let ((re (rx "\\usepackage" (opt "[" (*? nonl) "]") "{natbib}")))
-        (unless (re-search-backward re nil t)
-          (insert
-           (format "\\usepackage%s{natbib}\n"
-                   (if (null org-cite-natbib-options)
-                       ""
-                     (format "[%s]"
-                             (mapconcat #'symbol-name
-                                        org-cite-natbib-options
-                                        ","))))))))
-    (buffer-string)))
+(defun org-cite-natbib--generate-latex-preamble (info)
+  "Ensure that the \"natbib\" package is loaded.
+INFO is a plist used as a communication channel."
+  (and (not (string-match
+             (rx "\\usepackage" (opt "[" (*? nonl) "]") "{natbib}")
+             (plist-get info :latex-full-header)))
+       (format "\\usepackage%s{natbib}\n"
+               (if (null org-cite-natbib-options)
+                   ""
+                 (format "[%s]"
+                         (mapconcat #'symbol-name
+                                    org-cite-natbib-options
+                                    ","))))))
 
 
 ;;; Register `natbib' processor
 (org-cite-register-processor 'natbib
   :export-bibliography #'org-cite-natbib-export-bibliography
   :export-citation #'org-cite-natbib-export-citation
-  :export-finalizer #'org-cite-natbib-use-package
   :cite-styles
   '((("author" "a") ("caps" "a") ("full" "f"))
     (("noauthor" "na") ("bare" "b"))

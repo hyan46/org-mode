@@ -1,8 +1,8 @@
 ;;; org-mobile.el --- Code for Asymmetric Sync With a Mobile Device -*- lexical-binding: t; -*-
-;; Copyright (C) 2009-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2025 Free Software Foundation, Inc.
 ;;
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 ;;
 ;; This file is part of GNU Emacs.
@@ -30,6 +30,9 @@
 ;; Appendix B of the Org manual.  The code is not specific for the
 ;; iPhone and Android - any external viewer/flagging/editing
 ;; application that uses the same conventions could be used.
+
+(require 'org-macs)
+(org-assert-version)
 
 (require 'cl-lib)
 (require 'org)
@@ -389,7 +392,7 @@ agenda view showing the flagged items."
 	  (org-agenda nil "?"))))))
 
 (defun org-mobile-check-setup ()
-  "Check if org-mobile-directory has been set up."
+  "Check if `org-mobile-directory' has been set up."
   (org-mobile-cleanup-encryption-tempfile)
   (unless (and org-directory
 	       (stringp org-directory)
@@ -467,7 +470,7 @@ agenda view showing the flagged items."
       (insert "#+TAGS: " (mapconcat 'identity tags " ") "\n")
       (insert "#+ALLPRIORITIES: " org-mobile-allpriorities "\n")
       (when (file-exists-p (expand-file-name
-			    org-mobile-directory "agendas.org"))
+			    "agendas.org" org-mobile-directory))
 	(insert "* [[file:agendas.org][Agenda Views]]\n"))
       (pcase-dolist (`(,_ . ,link-name) files-alist)
 	(insert (format "* [[file:%s][%s]]\n" link-name link-name)))
@@ -617,18 +620,18 @@ The table of checksums is written to the file mobile-checksums."
 	 ((looking-at "[ \t]*$")) ; keep empty lines
 	 ((looking-at "=+$")
 	  ;; remove underlining
-	  (delete-region (point) (point-at-eol)))
+          (delete-region (point) (line-end-position)))
 	 ((get-text-property (point) 'org-agenda-structural-header)
 	  (setq in-date nil)
 	  (setq app (get-text-property (point) 'org-agenda-title-append))
 	  (setq short (get-text-property (point) 'short-heading))
 	  (when (and short (looking-at ".+"))
 	    (replace-match short nil t)
-	    (beginning-of-line 1))
+	    (forward-line 0))
 	  (when app
 	    (end-of-line 1)
 	    (insert app)
-	    (beginning-of-line 1))
+	    (forward-line 0))
 	  (insert "* "))
 	 ((get-text-property (point) 'org-agenda-date-header)
 	  (setq in-date t)
@@ -637,16 +640,16 @@ The table of checksums is written to the file mobile-checksums."
 		      (get-text-property (point) 'org-marker)))
 	  (setq sexp (member (get-text-property (point) 'type)
 			     '("diary" "sexp")))
-	  (if (setq pl (text-property-any (point) (point-at-eol) 'org-heading t))
+          (if (setq pl (text-property-any (point) (line-end-position) 'org-heading t))
 	      (progn
 		(setq prefix (org-trim (buffer-substring
 					(point) pl))
 		      line (org-trim (buffer-substring
 				      pl
-				      (point-at-eol))))
-		(delete-region (point-at-bol) (point-at-eol))
+                                      (line-end-position))))
+                (delete-region (line-beginning-position) (line-end-position))
 		(insert line "<before>" prefix "</before>")
-		(beginning-of-line 1))
+		(forward-line 0))
 	    (and (looking-at "[ \t]+") (replace-match "")))
 	  (insert (if in-date "***  " "**  "))
 	  (end-of-line 1)
@@ -663,7 +666,7 @@ The table of checksums is written to the file mobile-checksums."
 			      (org-mobile-get-outline-path-link m))))
 	      (insert "   :PROPERTIES:\n   :ORIGINAL_ID: " id
 		      "\n   :END:\n")))))
-	(beginning-of-line 2))
+	(forward-line 1))
       (push (cons "agendas.org" (md5 (buffer-string)))
 	    org-mobile-checksum-files))
     (message "Agenda written to Org file %s" file)))
@@ -857,7 +860,7 @@ If BEG and END are given, only do this in that region."
 	    (org-mobile-timestamp-buffer (marker-buffer id-pos))
 	    (push (marker-buffer id-pos) buf-list))
 	  (unless (markerp id-pos)
-	    (goto-char (+ 2 (point-at-bol)))
+            (goto-char (+ 2 (line-beginning-position)))
 	    (if (stringp id-pos)
 		(insert id-pos " ")
 	      (insert "BAD REFERENCE "))
@@ -1054,7 +1057,7 @@ be returned that indicates what went wrong."
 	      (goto-char (match-beginning 4))
 	      (insert new)
 	      (delete-region (point) (+ (point) (length current)))
-	      (org-align-tags))
+	      (when org-auto-align-tags (org-align-tags)))
 	     (t
 	      (error
 	       "Heading changed in the mobile device and on the computer")))))))
@@ -1068,7 +1071,7 @@ be returned that indicates what went wrong."
 	    (end-of-line 1)
 	    (org-insert-heading-respect-content t)
 	    (org-demote))
-	(beginning-of-line)
+	(forward-line 0)
 	(insert "* "))
       (insert new))
 
@@ -1093,7 +1096,7 @@ be returned that indicates what went wrong."
       (org-archive-to-archive-sibling))
 
      ((eq what 'body)
-      (setq current (buffer-substring (min (1+ (point-at-eol)) (point-max))
+      (setq current (buffer-substring (min (1+ (line-end-position)) (point-max))
 				      (save-excursion (outline-next-heading)
 						      (point))))
       (if (not (string-match "\\S-" current)) (setq current nil))

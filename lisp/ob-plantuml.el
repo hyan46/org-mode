@@ -1,6 +1,6 @@
 ;;; ob-plantuml.el --- Babel Functions for Plantuml  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2010-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2010-2025 Free Software Foundation, Inc.
 
 ;; Author: Zhang Weize
 ;; Keywords: literate programming, reproducible research
@@ -30,10 +30,14 @@
 
 ;;; Requirements:
 
-;; plantuml     | http://plantuml.sourceforge.net/
+;; plantuml     | https://plantuml.com/
 ;; plantuml.jar | `org-plantuml-jar-path' should point to the jar file (when exec mode is `jar')
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
+
 (require 'ob)
 
 (defvar org-babel-default-header-args:plantuml
@@ -53,7 +57,7 @@ The JAR can be configured via `org-plantuml-jar-path'.
 
 `plantuml' means to use the PlantUML executable.
 The executable can be configured via `org-plantuml-executable-path'.
-You can also configure extra arguments via `org-plantuml-executable-args'."
+You can also configure extra arguments via `org-plantuml-args'."
   :group 'org-babel
   :package-version '(Org . "9.4")
   :type 'symbol
@@ -112,7 +116,7 @@ This function is called by `org-babel-execute-src-block'."
   (let* ((do-export (member "file" (cdr (assq :result-params params))))
          (out-file (if do-export
                        (or (cdr (assq :file params))
-                           (error "No :file provided but :results set to file. For plain text output, set :results to verbatim"))
+                           (error "No :file provided but :results set to file.  For plain text output, set :results to verbatim"))
 		     (org-babel-temp-file "plantuml-" ".txt")))
 	 (cmdline (cdr (assq :cmdline params)))
 	 (in-file (org-babel-temp-file "plantuml-"))
@@ -139,6 +143,7 @@ This function is called by `org-babel-execute-src-block'."
 			    ("eps" '("-teps"))
 			    ("pdf" '("-tpdf"))
 			    ("tex" '("-tlatex"))
+                            ("tikz" '("-tlatex:nopreamble"))
 			    ("vdx" '("-tvdx"))
 			    ("xmi" '("-txmi"))
 			    ("scxml" '("-tscxml"))

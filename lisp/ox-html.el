@@ -1,11 +1,11 @@
-;;; ox-html.el --- HTML Back-End for Org Export Engine -*- lexical-binding: t; -*-
+;;; ox-html.el --- HTML Backend for Org Export Engine -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2011-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2011-2025 Free Software Foundation, Inc.
 
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
 ;;      Jambunathan K <kjambunathan at gmail dot com>
-;; Maintainer: TEC <tecosaur@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Maintainer: TEC <orgmode@tec.tecosaur.net>
+;; Keywords: outlines, hypermedia, calendar, text
 
 ;; This file is part of GNU Emacs.
 
@@ -24,18 +24,23 @@
 
 ;;; Commentary:
 
-;; This library implements a HTML back-end for Org generic exporter.
+;; This library implements a HTML backend for Org generic exporter.
 ;; See Org manual for more information.
 
 ;;; Code:
 
 ;;; Dependencies
 
+(require 'org-macs)
+(org-assert-version)
+
 (require 'cl-lib)
 (require 'format-spec)
 (require 'ox)
 (require 'ox-publish)
 (require 'table)
+(require 'org-latex-preview)
+(require 'ox-mathml)
 
 
 ;;; Function Declarations
@@ -52,7 +57,7 @@
 (defvar htmlize-output-type)
 (defvar htmlize-css-name-prefix)
 
-;;; Define Back-End
+;;; Define Backend
 
 (org-export-define-backend 'html
   '((bold . org-html-bold)
@@ -104,7 +109,8 @@
     (verbatim . org-html-verbatim)
     (verse-block . org-html-verse-block))
   :filters-alist '((:filter-options . org-html-infojs-install-script)
-		   (:filter-parse-tree . org-html-image-link-filter)
+		   (:filter-parse-tree org-html-image-link-filter
+                                       org-html-prepare-latex-images)
 		   (:filter-final-output . org-html-final-function))
   :menu-entry
   '(?h "Export to HTML"
@@ -152,6 +158,7 @@
     (:html-infojs-template nil nil org-html-infojs-template)
     (:html-inline-image-rules nil nil org-html-inline-image-rules)
     (:html-link-org-files-as-html nil nil org-html-link-org-files-as-html)
+    (:html-latex-image-options nil nil org-html-latex-image-options)
     (:html-mathjax-options nil nil org-html-mathjax-options)
     (:html-mathjax-template nil nil org-html-mathjax-template)
     (:html-metadata-timestamp-format nil nil org-html-metadata-timestamp-format)
@@ -214,7 +221,7 @@
     ("xhtml-frameset" . "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Frameset//EN\"
 \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-frameset.dtd\">")
     ("xhtml-11" . "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\"
-\"http://www.w3.org/TR/xhtml1/DTD/xhtml11.dtd\">")
+\"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">")
 
     ("html5" . "<!DOCTYPE html>")
     ("xhtml5" . "<!DOCTYPE html>"))
@@ -235,6 +242,10 @@ property on the headline itself.")
     ("--\\([^-]\\)" . "&#x2013;\\1")	; ndash
     ("\\.\\.\\." . "&#x2026;"))		; hellip
   "Regular expressions for special string conversion.")
+
+(defvar org-html--id-attr-prefix "ID-"
+  "Prefix to use in ID attributes.
+This affects IDs that are determined from the ID property.")
 
 (defcustom org-html-scripts
   "<script>
@@ -263,7 +274,7 @@ property on the headline itself.")
   :type 'string)
 
 (defcustom org-html-style-default
-  "<style>
+  "<style type=\"text/css\">
   #content { max-width: 60em; margin: auto; }
   .title  { text-align: center;
              margin-bottom: .2em; }
@@ -312,7 +323,7 @@ property on the headline itself.")
   pre.src-awk:before { content: 'Awk'; }
   pre.src-authinfo::before { content: 'Authinfo'; }
   pre.src-C:before { content: 'C'; }
-  /* pre.src-C++ doesn't work in CSS */
+  pre.src-C\\+\\+:before { content: 'C++'; }
   pre.src-clojure:before { content: 'Clojure'; }
   pre.src-css:before { content: 'CSS'; }
   pre.src-D:before { content: 'D'; }
@@ -325,7 +336,7 @@ property on the headline itself.")
   pre.src-haskell:before { content: 'Haskell'; }
   pre.src-hledger:before { content: 'hledger'; }
   pre.src-java:before { content: 'Java'; }
-  pre.src-js:before { content: 'Javascript'; }
+  pre.src-js:before { content: 'JavaScript'; }
   pre.src-latex:before { content: 'LaTeX'; }
   pre.src-ledger:before { content: 'Ledger'; }
   pre.src-lisp:before { content: 'Lisp'; }
@@ -537,7 +548,7 @@ Option settings will replace the %MANAGER-OPTIONS cookie."
 (defun org-html-infojs-install-script (exp-plist _backend)
   "Install script in export options when appropriate.
 EXP-PLIST is a plist containing export options.  BACKEND is the
-export back-end currently used."
+export backend currently used."
   (unless (or (memq 'body-only (plist-get exp-plist :export-options))
 	      (not (plist-get exp-plist :html-use-infojs))
 	      (and (eq (plist-get exp-plist :html-use-infojs) 'when-configured)
@@ -815,7 +826,7 @@ e.g. \"tex:mathjax\".  Allowed values are:
                 be loaded.
   `html'        Use `org-latex-to-html-convert-command' to convert
                 LaTeX fragments to HTML.
-  SYMBOL        Any symbol defined in `org-preview-latex-process-alist',
+  SYMBOL        Any symbol defined in `org-latex-preview-process-alist',
                 e.g., `dvipng'."
   :group 'org-export-html
   :version "24.4"
@@ -833,8 +844,10 @@ e.g. \"tex:mathjax\".  Allowed values are:
 
 When Org mode is exporting an Org file to HTML, links to non-HTML files
 are directly put into a \"href\" tag in HTML.  However, links to other Org files
-(recognized by the extension \".org\") should become links to the corresponding
+\(recognized by the extension \".org\") should become links to the corresponding
 HTML file, assuming that the linked Org file will also be converted to HTML.
+
+Links to \"file.org.gpg\" are also converted.
 
 When nil, the links still point to the plain \".org\" file."
   :group 'org-export-html
@@ -852,15 +865,15 @@ link to the image."
   :type 'boolean)
 
 (defcustom org-html-inline-image-rules
-  `(("file" . ,(regexp-opt '(".jpeg" ".jpg" ".png" ".gif" ".svg" ".webp")))
-    ("http" . ,(regexp-opt '(".jpeg" ".jpg" ".png" ".gif" ".svg" ".webp")))
-    ("https" . ,(regexp-opt '(".jpeg" ".jpg" ".png" ".gif" ".svg" ".webp"))))
+  `(("file" . ,(regexp-opt '(".jpeg" ".jpg" ".png" ".gif" ".svg" ".webp" ".avif")))
+    ("http" . ,(regexp-opt '(".jpeg" ".jpg" ".png" ".gif" ".svg" ".webp" ".avif")))
+    ("https" . ,(regexp-opt '(".jpeg" ".jpg" ".png" ".gif" ".svg" ".webp" ".avif"))))
   "Rules characterizing image files that can be inlined into HTML.
 A rule consists in an association whose key is the type of link
 to consider, and value is a regexp that will be matched against
 link's path."
   :group 'org-export-html
-  :package-version '(Org . "9.5")
+  :package-version '(Org . "9.7")
   :type '(alist :key-type (string :tag "Type")
 		:value-type (regexp :tag "Path")))
 
@@ -892,7 +905,8 @@ all the faces you are interested in are defined, for example by loading files
 in all modes you want.  Then, use the command
 `\\[org-html-htmlize-generate-css]' to extract class definitions."
   :group 'org-export-html
-  :type '(choice (const css) (const inline-css) (const nil)))
+  :type '(choice (const css) (const inline-css) (const nil))
+  :safe #'symbolp)
 
 (defcustom org-html-htmlize-font-prefix "org-"
   "The prefix for CSS class names for htmlize font specifications."
@@ -1158,74 +1172,139 @@ See `format-time-string' for more information on its components."
   :package-version '(Org . "8.0")
   :type 'string)
 
+(defcustom org-html-latex-image-options
+  '(:foreground "Black" :background "Transparent"
+    :page-width 1.0 :scale 1.0 :image-dir "ltximg" :inline nil)
+  "LaTeX preview options that apply to generated images.
+This is a HTML-specific counterpart to
+`org-latex-preview-appearance-options', which see.
+
+This supports two extra properties,
+:image-dir  an html-export counterpart of `org-latex-preview-cache', and
+:inline     a list of image format symbols that should not be saved according
+            to :image-dir, but instead inlined in the generated HTML.
+            Valid format symbols are:
+            - png, to inline png images using <img> with a data URI
+            - svg, to inline svg images using <img> with a data URI
+            - svg-embed, to inline svg images using an <svg> element.
+              This is only applied when used along with svg, as in
+              (svg svg-embed)."
+  :group 'org-export-html
+  :package-version '(Org . "9.7")
+  :type 'plist)
+
 ;;;; Template :: Mathjax
 
 (defcustom org-html-mathjax-options
-  '((path "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-AMS_HTML" )
-    (scale "100")
+  '((path "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js")
+    (scale 1.0)
     (align "center")
-    (font "TeX")
-    (linebreaks "false")
-    (autonumber "AMS")
+    (font "mathjax-modern")
+    (overflow "overflow")
+    (tags "ams")
     (indent "0em")
     (multlinewidth "85%")
     (tagindent ".8em")
     (tagside "right"))
   "Options for MathJax setup.
 
-Alist of the following elements.  All values are strings.
+Alist of the following elements.
 
-path          The path to MathJax.
+path          The path to MathJax version 3 or later.
 scale         Scaling with HTML-CSS, MathML and SVG output engines.
 align         How to align display math: left, center, or right.
-font          The font to use with HTML-CSS and SVG output.  As of MathJax 2.5
-              the following values are understood: \"TeX\", \"STIX-Web\",
-              \"Asana-Math\", \"Neo-Euler\", \"Gyre-Pagella\",
-              \"Gyre-Termes\", and \"Latin-Modern\".
+font          The font to use with HTML-CSS and SVG output.  Needs
+              MathJax version 4+.  MathJax 4 provides 11 fonts:
+              \"mathjax-modern\"   Latin-Modern font, default in MathJax 4+
+              \"mathjax-asana\"    Asana-Math font
+              \"mathjax-bonum\"    Gyre Bonum font
+              \"mathjax-dejavu\"   Gyre DejaVu font
+              \"mathjax-pagella\"  Gyre Pagella font
+              \"mathjax-schola\"   Gyre Schola font
+              \"mathjax-termes\"   Gyre Termes font
+              \"mathjax-stix2\"    STIX2 font
+              \"mathjax-fira\"     Fira and Fira-Math fonts
+              \"mathjax-euler\"    Neo Euler font that extends Latin-Modern
+              \"mathjax-tex\"      The original MathJax TeX font
+overflow      How to break displayed equations when too large.  Needs
+              MathJax 4 or newer.  Supported options include
+              \"overflow\", \"scale\", \"scroll\", \"truncate\",
+              \"linebreak\", and \"elide\".
 linebreaks    Let MathJax perform automatic linebreaks.  Valid values
               are \"true\" and \"false\".
-indent        If align is not center, how far from the left/right side?
+indent        If align is not center, how far from the left/right side?  For
+              example, \"1em\".
 multlinewidth The width of the multline environment.
-autonumber    How to number equations.  Valid values are \"None\",
-              \"All\" and \"AMS\".
+tags          How to number equations.  Valid values are \"none\",
+              \"all\" and \"ams\".
 tagindent     The amount tags are indented.
 tagside       Which side to show tags/labels on.  Valid values are
               \"left\" and \"right\"
 
-You can also customize this for each buffer, using something like
+You can also customize this for some buffer, using something like
 
-#+HTML_MATHJAX: align: left indent: 5em tagside: left font: Neo-Euler
+#+HTML_MATHJAX: align: left indent: 5em tagside: left
 
 For further information about MathJax options, see the MathJax documentation:
 
-  https://docs.mathjax.org/"
+  https://docs.mathjax.org/
+
+To maintain compatibility with pre-9.6 Org that used MathJax 2,
+the following conversions take place.
+
+The legacy \"autonumber\" option, with the value \"AMS\",
+\"None\", or \"All\", becomes the \"tags\" option set to the
+value \"ams\", \"none\", or \"all\", respectively.
+
+Any legacy values of the \"scale\" option, specified as
+percentage strings, become converted to unit-interval numbers.
+For example, a legacy scale of \"150\" becomes a scale of 1.5.
+
+The legacy \"linebreaks\" option, with the value \"true\" or
+\"false\", becomes the \"overflow\" option set to the value
+\"linebreak\" or \"overflow\", respectively.
+
+The legacy values of the \"font\" option, namely \"TeX\",
+\"STIX-Web\", \"Asana-Math\", \"Neo-Euler\", \"Gyre-Pagella\",
+\"Gyre-Termes\", \"Latin-Modern\", become converted to the
+corresponding MathJax 4+ font names.
+
+Legacy options and values always take precedence."
   :group 'org-export-html
-  :package-version '(Org . "8.3")
+  :package-version '(Org . "9.6")
   :type '(list :greedy t
 	       (list :tag "path   (the path from where to load MathJax.js)"
 		     (const :format "       " path) (string))
 	       (list :tag "scale  (scaling for the displayed math)"
-		     (const :format "       " scale) (string))
+		     (const :format "   " scale) (float))
 	       (list :tag "align  (alignment of displayed equations)"
 		     (const :format "       " align) (string))
-	       (list :tag "font (used to display math)"
-		     (const :format "            " font)
-		     (choice (const "TeX")
-			     (const "STIX-Web")
-			     (const "Asana-Math")
-			     (const "Neo-Euler")
-			     (const "Gyre-Pagella")
-			     (const "Gyre-Termes")
-			     (const "Latin-Modern")))
-	       (list :tag "linebreaks (automatic line-breaking)"
-		     (const :format "      " linebreaks)
-		     (choice (const "true")
-			     (const "false")))
-	       (list :tag "autonumber (when should equations be numbered)"
-		     (const :format "      " autonumber)
-		     (choice (const "AMS")
-			     (const "None")
-			     (const "All")))
+               (list :tag "font (used to typeset math)"
+		     (const :format "               " font)
+                     (choice (const "mathjax-modern")
+                             (const "mathjax-asana")
+                             (const "mathjax-bonum")
+                             (const "mathjax-dejavu")
+                             (const "mathjax-pagella")
+                             (const "mathjax-schola")
+                             (const "mathjax-termes")
+                             (const "mathjax-stix2")
+                             (const "mathjax-fira")
+                             (const "mathjax-euler")
+                             (const "mathjax-tex")))
+               (list :tag "overflow (how to break displayed math)"
+		     (const :format "         " overflow)
+                     (choice (const "overflow")
+                             (const "scale")
+                             (const "scroll")
+                             (const "truncate")
+                             (const "linebreak")
+                             (const "elide")))
+	       (list :tag "tags (whether equations are numbered and how)"
+		     (const :format "    " tags)
+		     (choice (const "ams")
+			     (const "none")
+			     (const "all")))
 	       (list :tag "indent (indentation with left or right alignment)"
 		     (const :format "       " indent) (string))
 	       (list :tag "multlinewidth (width to use for the multline environment)"
@@ -1238,27 +1317,38 @@ For further information about MathJax options, see the MathJax documentation:
 			     (const "right")))))
 
 (defcustom org-html-mathjax-template
-  "<script type=\"text/x-mathjax-config\">
-    MathJax.Hub.Config({
-        displayAlign: \"%ALIGN\",
-        displayIndent: \"%INDENT\",
-
-        \"HTML-CSS\": { scale: %SCALE,
-                        linebreaks: { automatic: \"%LINEBREAKS\" },
-                        webFont: \"%FONT\"
-                       },
-        SVG: {scale: %SCALE,
-              linebreaks: { automatic: \"%LINEBREAKS\" },
-              font: \"%FONT\"},
-        NativeMML: {scale: %SCALE},
-        TeX: { equationNumbers: {autoNumber: \"%AUTONUMBER\"},
-               MultLineWidth: \"%MULTLINEWIDTH\",
-               TagSide: \"%TAGSIDE\",
-               TagIndent: \"%TAGINDENT\"
-             }
-});
+  "<script>
+  window.MathJax = {
+    tex: {
+      ams: {
+        multlineWidth: '%MULTLINEWIDTH'
+      },
+      tags: '%TAGS',
+      tagSide: '%TAGSIDE',
+      tagIndent: '%TAGINDENT'
+    },
+    chtml: {
+      scale: %SCALE,
+      displayAlign: '%ALIGN',
+      displayIndent: '%INDENT'
+    },
+    svg: {
+      scale: %SCALE,
+      displayAlign: '%ALIGN',
+      displayIndent: '%INDENT'
+    },
+    output: {
+      font: '%FONT',
+      displayOverflow: '%OVERFLOW'
+    }
+  };
 </script>
-<script src=\"%PATH\"></script>"
+
+<script
+  id=\"MathJax-script\"
+  async
+  src=\"%PATH\">
+</script>"
   "The MathJax template.  See also `org-html-mathjax-options'."
   :group 'org-export-html
   :type 'string)
@@ -1270,9 +1360,11 @@ For further information about MathJax options, see the MathJax documentation:
 
 When set to `auto', check against the
 `org-export-with-author/email/creator/date' variables to set the
-content of the postamble.  When set to a string, use this string
-as the postamble.  When t, insert a string as defined by the
-formatting string in `org-html-postamble-format'.
+content of the postamble.  When t, insert a string as defined by the
+formatting string in `org-html-postamble-format'.  When set to a
+string, use this formatting string instead (see
+`org-html-postamble-format' for an example of such a formatting
+string).
 
 When set to a function, apply this function and insert the
 returned string.  The function takes the property list of export
@@ -1464,7 +1556,8 @@ style information."
 This variable can contain the full HTML structure to provide a
 style, including the surrounding HTML tags.  You can consider
 including definitions for the following classes: title, todo,
-done, timestamp, timestamp-kwd, tag, target.
+done, timestamp, timestamp-kwd, tag, target.  Can be a string, or
+a function that accepts the INFO plist and returns a string.
 
 For example, a valid value would be:
 
@@ -1487,21 +1580,23 @@ header.
 You can set this on a per-file basis using #+HTML_HEAD:,
 or for publication projects using the :html-head property."
   :group 'org-export-html
-  :version "24.4"
-  :package-version '(Org . "8.0")
-  :type 'string)
+  :package-version '(Org . "9.8")
+  :type '(choice (string :tag "Literal text to insert")
+                 (function :tag "Function evaluating to a string")))
 ;;;###autoload
 (put 'org-html-head 'safe-local-variable 'stringp)
 
 (defcustom org-html-head-extra ""
   "More head information to add in the HTML output.
 
-You can set this on a per-file basis using #+HTML_HEAD_EXTRA:,
-or for publication projects using the :html-head-extra property."
+You can set this on a per-file basis using #+HTML_HEAD_EXTRA:, or
+for publication projects using the :html-head-extra property.
+Can be a string, or a function that accepts the INFO plist and returns
+a string."
   :group 'org-export-html
-  :version "24.4"
-  :package-version '(Org . "8.0")
-  :type 'string)
+  :package-version '(Org . "9.8")
+  :type '(choice (string :tag "Literal text to insert")
+                 (function :tag "Function evaluating to a string")))
 ;;;###autoload
 (put 'org-html-head-extra 'safe-local-variable 'stringp)
 
@@ -1581,11 +1676,38 @@ https://developer.mozilla.org/en-US/docs/Mozilla/Mobile/Viewport_meta_tag"
                              selector_eval_scheme: '.src-scheme',
                              selector: '.src-clojure',
                              selector_eval_ruby: '.src-ruby'};"
-  "Javascript snippet to activate klipse."
+  "JavaScript snippet to activate klipse."
   :group 'org-export-html
   :package-version '(Org . "9.1")
   :type 'string)
 
+;;;; LaTeX Fragments
+
+(defcustom org-latex-to-html-convert-command nil
+  "Shell command to convert LaTeX fragments to HTML.
+This command is very open-ended: the output of the command will
+directly replace the LaTeX fragment in the resulting HTML.
+Replace format-specifiers in the command as noted below and use
+`shell-command' to convert LaTeX to HTML.
+%i:     The LaTeX fragment to be converted (shell-escaped).
+        It must not be used inside a quoted argument, the result of %i
+        expansion inside a quoted argument is undefined.
+
+For example, this could be used with LaTeXML as
+\"latexmlc literal:%i --profile=math --preload=siunitx.sty 2>/dev/null\"."
+  :group 'org-latex
+  :package-version '(Org . "9.4")
+  :type '(choice
+          (const :tag "None" nil)
+          (string :tag "Shell command")))
+
+(defun org-format-latex-as-html (latex-fragment)
+  "Convert LATEX-FRAGMENT to HTML.
+This uses  `org-latex-to-html-convert-command', which see."
+  (let ((cmd (format-spec org-latex-to-html-convert-command
+                          `((?i . ,latex-fragment)))))
+    (message "Running %s" cmd)
+    (shell-command-to-string cmd)))
 
 ;;;; Todos
 
@@ -1602,10 +1724,12 @@ CSS classes, then this prefix can be very useful."
 ;;; Internal Functions
 
 (defun org-html-xhtml-p (info)
+  "Return non-nil when :html-doctype property in INFO plist is xhtml."
   (let ((dt (downcase (plist-get info :html-doctype))))
     (string-match-p "xhtml" dt)))
 
 (defun org-html-html5-p (info)
+  "Return non-nil when :html-doctype property in INFO plist is html5 or equivalent."
   (let ((dt (downcase (plist-get info :html-doctype))))
     (member dt '("html5" "xhtml5" "<!doctype html>"))))
 
@@ -1619,6 +1743,7 @@ INFO is the current state of the export process, as a plist."
   "Return close-tag for string TAG.
 ATTR specifies additional attributes.  INFO is a property list
 containing current export state."
+  (declare (indent 1))
   (concat "<" tag
 	  (org-string-nw-p (concat " " attr))
 	  (if (org-html-xhtml-p info) " />" ">")))
@@ -1655,18 +1780,22 @@ When NAMED-ONLY is non-nil and DATUM has no NAME keyword, return
 nil.  This doesn't apply to headlines, inline tasks, radio
 targets and targets."
   (let* ((type (org-element-type datum))
+	 (custom-id (and (memq type '(headline inlinetask))
+			 (org-element-property :CUSTOM_ID datum)))
 	 (user-label
-	  (org-element-property
-	   (pcase type
-	     ((or `headline `inlinetask) :CUSTOM_ID)
-	     ((or `radio-target `target) :value)
-	     (_ :name))
-	   datum)))
+	  (or
+	   custom-id
+	   (and (memq type '(radio-target target))
+		(org-element-property :value datum))
+	   (org-element-property :name datum)
+	   (when-let* ((id (org-element-property :ID datum)))
+	     (concat org-html--id-attr-prefix id)))))
+
     (cond
      ((and user-label
 	   (or (plist-get info :html-prefer-user-labels)
 	       ;; Used CUSTOM_ID property unconditionally.
-	       (memq type '(headline inlinetask))))
+	       custom-id))
       user-label)
      ((and named-only
 	   (not (memq type '(headline inlinetask radio-target target)))
@@ -1704,11 +1833,7 @@ a communication channel."
    (org-html--make-attribute-string
     (org-combine-plists
      (list :src source
-           :alt (if (string-match-p
-                     (concat "^" org-preview-latex-image-directory) source)
-                    (org-html-encode-plain-text
-                     (org-find-text-property-in-string 'org-latex-src source))
-                  (file-name-nondirectory source)))
+           :alt (file-name-nondirectory source))
      (if (string= "svg" (file-name-extension source))
          (org-combine-plists '(:class "org-svg") attributes '(:fallback nil))
        attributes)))
@@ -1755,20 +1880,23 @@ This command just produces a buffer that contains class definitions for all
 faces used in the current Emacs session.  You can copy and paste the ones you
 need into your CSS file.
 
+The face definitions are prepended with
+`org-html-htmlize-font-prefix'.
+
 If you then set `org-html-htmlize-output-type' to `css', calls
 to the function `org-html-htmlize-region-for-paste' will
 produce code that uses these same face definitions."
   (interactive)
-  (unless (require 'htmlize nil t)
-    (error "htmlize library missing.  Aborting"))
+  (org-require-package 'htmlize)
   (and (get-buffer "*html*") (kill-buffer "*html*"))
   (with-temp-buffer
     (let ((fl (face-list))
-	  (htmlize-css-name-prefix "org-")
+	  (htmlize-css-name-prefix org-html-htmlize-font-prefix)
 	  (htmlize-output-type 'css)
 	  f i)
-      (while (setq f (pop fl)
-		   i (and f (face-attribute f :inherit)))
+      (while fl
+        (setq f (pop fl)
+	      i (and f (face-attribute f :inherit)))
 	(when (and (symbolp f) (or (not i) (not (listp i))))
 	  (insert (org-add-props (copy-sequence "1") nil 'face f))))
       (htmlize-region (point-min) (point-max))))
@@ -1778,7 +1906,7 @@ produce code that uses these same face definitions."
     (delete-region (point-min) (match-beginning 0)))
   (when (re-search-forward "</style>" nil t)
     (delete-region (1+ (match-end 0)) (point-max)))
-  (beginning-of-line 1)
+  (forward-line 0)
   (when (looking-at " +") (replace-match ""))
   (goto-char (point-min)))
 
@@ -1797,36 +1925,43 @@ INFO is a plist used as a communication channel."
   (pcase (org-export-collect-footnote-definitions info)
     (`nil nil)
     (definitions
+     (format
+      (plist-get info :html-footnotes-section)
+      (org-html--translate "Footnotes" info)
       (format
-       (plist-get info :html-footnotes-section)
-       (org-html--translate "Footnotes" info)
-       (format
-	"\n%s\n"
-	(mapconcat
-	 (lambda (definition)
-	   (pcase definition
-	     (`(,n ,_ ,def)
-	      ;; `org-export-collect-footnote-definitions' can return
-	      ;; two kinds of footnote definitions: inline and blocks.
-	      ;; Since this should not make any difference in the HTML
-	      ;; output, we wrap the inline definitions within
-	      ;; a "footpara" class paragraph.
-	      (let ((inline? (not (org-element-map def org-element-all-elements
-				    #'identity nil t)))
-		    (anchor (org-html--anchor
-			     (format "fn.%d" n)
-			     n
-			     (format " class=\"footnum\" href=\"#fnr.%d\" role=\"doc-backlink\"" n)
-			     info))
-		    (contents (org-trim (org-export-data def info))))
-		(format "<div class=\"footdef\">%s %s</div>\n"
-			(format (plist-get info :html-footnote-format) anchor)
-			(format "<div class=\"footpara\" role=\"doc-footnote\">%s</div>"
-				(if (not inline?) contents
-				  (format "<p class=\"footpara\">%s</p>"
-					  contents))))))))
-	 definitions
-	 "\n"))))))
+       "\n%s\n"
+       (mapconcat
+	(lambda (definition)
+	  (pcase definition
+	    (`(,n ,label ,def)
+             ;; Do not assign number labels as they appear in Org mode
+             ;; - the footnotes are re-numbered by
+             ;; `org-export-get-footnote-number'.  If the label is not
+             ;; a number, keep it.
+             (when (and (stringp label)
+                        (equal label (number-to-string (string-to-number label))))
+               (setq label nil))
+	     ;; `org-export-collect-footnote-definitions' can return
+	     ;; two kinds of footnote definitions: inline and blocks.
+	     ;; Since this should not make any difference in the HTML
+	     ;; output, we wrap the inline definitions within
+	     ;; a "footpara" class paragraph.
+	     (let ((inline? (not (org-element-map def org-element-all-elements
+				 #'identity nil t)))
+		   (anchor (org-html--anchor
+                            (format "fn.%s" (or label n))
+			    n
+			    (format " class=\"footnum\" href=\"#fnr.%s\" role=\"doc-backlink\"" (or label n))
+			    info))
+		   (contents (org-trim (org-export-data def info))))
+	       (format "<div class=\"footdef\">%s %s</div>\n"
+		       (format (plist-get info :html-footnote-format) anchor)
+		       (format "<div class=\"footpara\" role=\"doc-footnote\">%s</div>"
+			       (if (not inline?) contents
+				 (format "<p class=\"footpara\">%s</p>"
+					 contents))))))))
+	definitions
+	"\n"))))))
 
 
 ;;; Template
@@ -1918,6 +2053,15 @@ INFO is a plist used as a communication channel."
 		  org-html-meta-tags))
       ""))))
 
+(defun org-html-normalize-string-or-function (input &rest args)
+  "Normalize INPUT function or string.
+If INPUT is a string, it is passed to
+`org-element-normalize-string'.  If INPUT is a function, it is
+applied to arguments ARGS, and the result is passed to
+`org-element-normalize-string'."
+  (let ((s (if (functionp input) (format "%s" (apply input args)) input)))
+    (org-element-normalize-string s)))
+
 (defun org-html--build-head (info)
   "Return information for the <head>..</head> of the HTML output.
 INFO is a plist used as a communication channel."
@@ -1925,8 +2069,9 @@ INFO is a plist used as a communication channel."
    (concat
     (when (plist-get info :html-head-include-default-style)
       (org-element-normalize-string org-html-style-default))
-    (org-element-normalize-string (plist-get info :html-head))
-    (org-element-normalize-string (plist-get info :html-head-extra))
+    (org-html-normalize-string-or-function (plist-get info :html-head) info)
+    (org-html-normalize-string-or-function (plist-get info :html-head-extra)
+                                           info)
     (when (and (plist-get info :html-htmlized-css-url)
 	       (eq org-html-htmlize-output-type 'css))
       (org-html-close-tag "link"
@@ -1939,21 +2084,85 @@ INFO is a plist used as a communication channel."
   "Insert the user setup into the mathjax template.
 INFO is a plist used as a communication channel."
   (when (and (memq (plist-get info :with-latex) '(mathjax t))
-	     (org-element-map (plist-get info :parse-tree)
-		 '(latex-fragment latex-environment) #'identity info t nil t))
+             (org-element-map (plist-get info :parse-tree)
+                 '(latex-fragment latex-environment) #'identity info t nil t))
     (let ((template (plist-get info :html-mathjax-template))
-	  (options (plist-get info :html-mathjax-options))
-	  (in-buffer (or (plist-get info :html-mathjax) "")))
+          (options (let ((options (plist-get info :html-mathjax-options)))
+                     ;; If the user customized some legacy option, set
+                     ;; the corresponding new option to nil, so that
+                     ;; the legacy user choice overrides the default.
+                     ;; Otherwise, the user did not set the legacy
+                     ;; option, in which case still set the legacy
+                     ;; option but to no value, so that the code can
+                     ;; find its in-buffer value, if set.
+                     `((,(if (plist-member options 'autonumber)
+                             'tags 'autonumber)
+                        nil)
+                       (,(if (plist-member options 'linebreaks)
+                             'overflow 'linebreaks)
+                        nil)
+                       ,@options)))
+          (in-buffer (or (plist-get info :html-mathjax) "")))
       (dolist (e options (org-element-normalize-string template))
-	(let ((name (car e))
-	      (val (nth 1 e)))
-	  (when (string-match (concat "\\<" (symbol-name name) ":") in-buffer)
-	    (setq val
-		  (car (read-from-string (substring in-buffer (match-end 0))))))
-	  (unless (stringp val) (setq val (format "%s" val)))
-	  (while (string-match (concat "%" (upcase (symbol-name name)))
-			       template)
-	    (setq template (replace-match val t t template))))))))
+        (let ((symbol (car e))
+              (value (nth 1 e)))
+          (when (string-match (concat "\\<" (symbol-name symbol) ":")
+                              in-buffer)
+            (setq value
+                  (car (split-string (substring in-buffer
+                                                (match-end 0))))))
+          (when value
+            (pcase symbol
+              (`font
+               (when-let*
+                   ((value-new
+                     (pcase value
+                       ("TeX" "mathjax-tex")
+                       ("STIX-Web" "mathjax-stix2")
+                       ("Asana-Math" "mathjax-asana")
+                       ("Neo-Euler" "mathjax-euler")
+                       ("Gyre-Pagella" "mathjax-pagella")
+                       ("Gyre-Termes" "mathjax-termes")
+                       ("Latin-Modern" "mathjax-modern"))))
+                 (setq value value-new)))
+              (`linebreaks
+               (org-display-warning
+                "Converting legacy MathJax option: linebreaks")
+               (setq symbol 'overflow
+                     value (if (string= value "true")
+                               "linebreak"
+                             "overflow")))
+              (`scale
+               (when (stringp value)
+                 (let ((value-maybe (string-to-number value)))
+                   (setq value
+                         (if (= value-maybe 0)
+                             (progn
+                               (org-display-warning
+                                (format "Non-numerical MathJax scale: %s"
+                                        value))
+                               1.0)
+                           value-maybe))))
+               (when (>= value 10)
+                 (setq value
+                       (let ((value-new (/ (float value) 100)))
+                         (org-display-warning
+                          (format "Converting legacy MathJax scale: %s to %s"
+                                  value
+                                  value-new))
+                         value-new))))
+              (`autonumber
+               (org-display-warning
+                "Converting legacy MathJax option: autonumber")
+               (setq symbol 'tags
+                     value (downcase value))))
+            (while (string-match (format "\\(%%%s\\)[^A-Z]"
+                                         (upcase (symbol-name symbol)))
+                                 template)
+              (setq template
+                    (replace-match (format "%s" value)
+                                   t
+                                   t template 1)))))))))
 
 (defun org-html-format-spec (info)
   "Return format specification for preamble and postamble.
@@ -1987,7 +2196,7 @@ communication channel."
 	     (if (functionp section) (funcall section info)
 	       (cond
 		((stringp section) (format-spec section spec))
-		((eq section 'auto)
+		((and (eq section 'auto) (eq type 'postamble))
 		 (let ((date (cdr (assq ?d spec)))
 		       (author (cdr (assq ?a spec)))
 		       (email (cdr (assq ?e spec)))
@@ -2069,8 +2278,7 @@ holding export options."
 	 (format "%s\n"
 		 (format decl
 			 (or (and org-html-coding-system
-                                  ;; FIXME: Use Emacs 22 style here, see `coding-system-get'.
-				  (coding-system-get org-html-coding-system 'mime-charset))
+				  (coding-system-get org-html-coding-system :mime-charset))
 			     "iso-8859-1"))))))
    (org-html-doctype info)
    "\n"
@@ -2144,7 +2352,9 @@ INFO is a plist used as a communication channel."
 ;;;; Anchor
 
 (defun org-html--anchor (id desc attributes info)
-  "Format a HTML anchor."
+  "Format a HTML anchor.
+ID is the anchor id.  ATTRIBUTES is the anchor attributes, as a string.
+DESC is the anchor text.  INFO is the info plist."
   (let* ((name (and (plist-get info :html-allow-name-attribute-in-anchors) id))
 	 (attributes (concat (and id (format " id=\"%s\"" id))
 			     (and name (format " name=\"%s\"" name))
@@ -2154,7 +2364,9 @@ INFO is a plist used as a communication channel."
 ;;;; Todo
 
 (defun org-html--todo (todo info)
-  "Format TODO keywords into HTML."
+  "Format TODO keywords into HTML.
+TODO is the keyword, as a string.
+INFO is the info plist."
   (when todo
     (format "<span class=\"%s %s%s\">%s</span>"
 	    (if (member todo org-done-keywords) "done" "todo")
@@ -2199,14 +2411,13 @@ is the language used for CODE, as a string, or nil."
      ((not org-html-htmlize-output-type) (org-html-encode-plain-text code))
      ;; No htmlize library or an inferior version of htmlize.
      ((not (progn (require 'htmlize nil t)
-		  (fboundp 'htmlize-region-for-paste)))
+		(fboundp 'htmlize-region-for-paste)))
       ;; Emit a warning.
-      (message "Cannot fontify source block (htmlize.el >= 1.34 required)")
+      (warn "Cannot fontify source block (htmlize.el >= 1.34 required).  Falling back to plain text.  (see `org-html-htmlize-output-type')")
       (org-html-encode-plain-text code))
      (t
       ;; Map language
-      (setq lang (or (assoc-default lang org-src-lang-modes) lang))
-      (let* ((lang-mode (and lang (intern (format "%s-mode" lang)))))
+      (let* ((lang-mode (and lang (org-src-get-lang-mode lang))))
 	(cond
 	 ;; Case 1: Language is not associated with any Emacs mode
 	 ((not (functionp lang-mode))
@@ -2318,14 +2529,19 @@ of contents as a string, or nil if it is empty."
 			 (org-export-get-relative-level headline info)))
 		 (org-export-collect-headlines info depth scope))))
     (when toc-entries
-      (let ((toc (concat "<div id=\"text-table-of-contents\" role=\"doc-toc\">"
-			 (org-html--toc-text toc-entries)
-			 "</div>\n")))
+      (let* ((toc-id-counter (plist-get info :org-html--toc-counter))
+             (toc (concat (format "<div id=\"text-table-of-contents%s\" role=\"doc-toc\">"
+                                  (if toc-id-counter (format "-%d" toc-id-counter) ""))
+			  (org-html--toc-text toc-entries)
+			  "</div>\n")))
+        (plist-put info :org-html--toc-counter (1+ (or toc-id-counter 0)))
 	(if scope toc
 	  (let ((outer-tag (if (org-html--html5-fancy-p info)
 			       "nav"
 			     "div")))
-	    (concat (format "<%s id=\"table-of-contents\" role=\"doc-toc\">\n" outer-tag)
+	    (concat (format "<%s id=\"table-of-contents%s\" role=\"doc-toc\">\n"
+                            outer-tag
+                            (if toc-id-counter (format "-%d" toc-id-counter) ""))
 		    (let ((top-level (plist-get info :html-toplevel-hlevel)))
 		      (format "<h%d>%s</h%d>\n"
 			      top-level
@@ -2542,7 +2758,10 @@ information."
   (let ((attributes (org-export-read-attribute :attr_html example-block)))
     (if (plist-get attributes :textarea)
 	(org-html--textarea-block example-block)
-      (format "<pre class=\"example\"%s>\n%s</pre>"
+      (if-let* ((class-val (plist-get attributes :class)))
+          (setq attributes (plist-put attributes :class (concat "example " class-val)))
+        (setq attributes (plist-put attributes :class "example")))
+      (format "<pre%s>\n%s</pre>"
 	      (let* ((reference (org-html--reference example-block info))
 		     (a (org-html--make-attribute-string
 			 (if (or (not reference) (plist-member attributes :id))
@@ -2586,19 +2805,36 @@ CONTENTS is nil.  INFO is a plist holding contextual information."
   (concat
    ;; Insert separator between two footnotes in a row.
    (let ((prev (org-export-get-previous-element footnote-reference info)))
-     (when (eq (org-element-type prev) 'footnote-reference)
+     (when (org-element-type-p prev 'footnote-reference)
        (plist-get info :html-footnote-separator)))
    (let* ((n (org-export-get-footnote-number footnote-reference info))
-	  (id (format "fnr.%d%s"
-		      n
+          (label (org-element-property :label footnote-reference))
+          ;; Do not assign number labels as they appear in Org mode -
+          ;; the footnotes are re-numbered by
+          ;; `org-export-get-footnote-number'.  If the label is not a
+          ;; number, keep it.
+          (label (if (and (stringp label)
+                          (equal label (number-to-string (string-to-number label))))
+                          nil
+                   label))
+	  (id (format "fnr.%s%s"
+		      (or label n)
 		      (if (org-export-footnote-first-reference-p
 			   footnote-reference info)
 			  ""
-			".100"))))
+                        (let ((label (org-element-property :label footnote-reference)))
+                          (format
+                           ".%d"
+                           (org-export-get-ordinal
+                            footnote-reference info '(footnote-reference)
+                            `(lambda (ref _)
+                               (if ,label
+                                   (equal (org-element-property :label ref) ,label)
+                                 (not (org-element-property :label ref)))))))))))
      (format
       (plist-get info :html-footnote-format)
       (org-html--anchor
-       id n (format " class=\"footref\" href=\"#fn.%d\" role=\"doc-backlink\"" n) info)))))
+       id n (format " class=\"footref\" href=\"#fn.%s\" role=\"doc-backlink\"" (or label n)) info)))))
 
 ;;;; Headline
 
@@ -2670,14 +2906,15 @@ holding contextual information."
                   ;; empty one to get the correct <div
                   ;; class="outline-...> which is needed by
                   ;; `org-info.js'.
-                  (if (eq (org-element-type first-content) 'section) contents
+                  (if (org-element-type-p first-content 'section) contents
                     (concat (org-html-section first-content "" info) contents))
                   (org-html--container headline info)))))))
 
 (defun org-html-format-headline-default-function
     (todo _todo-type priority text tags info)
   "Default format function for a headline.
-See `org-html-format-headline-function' for details."
+See `org-html-format-headline-function' for details and the
+description of TODO, PRIORITY, TEXT, TAGS, and INFO arguments."
   (let ((todo (org-html--todo todo info))
 	(priority (org-html--priority priority info))
 	(tags (org-html--tags tags info)))
@@ -2687,6 +2924,8 @@ See `org-html-format-headline-function' for details."
 	    (and tags "&#xa0;&#xa0;&#xa0;") tags)))
 
 (defun org-html--container (headline info)
+  "Return HTML container name for HEADLINE as a string.
+INFO is the info plist."
   (or (org-element-property :HTML_CONTAINER headline)
       (if (= 1 (org-export-get-relative-level headline info))
 	  (plist-get info :html-container)
@@ -2735,12 +2974,14 @@ holding contextual information."
 (defun org-html-format-inlinetask-default-function
     (todo todo-type priority text tags contents info)
   "Default format function for inlinetasks.
-See `org-html-format-inlinetask-function' for details."
+See `org-html-format-inlinetask-function' for details and the
+description of TODO, TODO-TYPE, PRIORITY, TEXT, TAGS, CONTENTS, and
+INFO arguments."
   (format "<div class=\"inlinetask\">\n<b>%s</b>%s\n%s</div>"
 	  (org-html-format-headline-default-function
 	   todo todo-type priority text tags info)
 	  (org-html-close-tag "br" nil info)
-	  contents))
+	  (or contents "")))
 
 ;;;; Italic
 
@@ -2765,7 +3006,10 @@ INFO is a plist holding contextual information.  See
 (defun org-html-format-list-item (contents type checkbox info
 					   &optional term-counter-id
 					   headline)
-  "Format a list item into HTML."
+  "Format a list item into HTML.
+CONTENTS is the item contents.  TYPE is one of symbols `ordered',
+`unordered', or `descriptive'.  CHECKBOX checkbox type is nil or one of
+symbols `on', `off', or `trans'.   INFO is the info plist."
   (let ((class (if checkbox
 		   (format " class=\"%s\""
 			   (symbol-name checkbox)) ""))
@@ -2807,7 +3051,7 @@ INFO is a plist holding contextual information.  See
   "Transcode an ITEM element from Org to HTML.
 CONTENTS holds the contents of the item.  INFO is a plist holding
 contextual information."
-  (let* ((plain-list (org-export-get-parent item))
+  (let* ((plain-list (org-element-parent item))
 	 (type (org-element-property :type plain-list))
 	 (counter (org-element-property :counter item))
 	 (checkbox (org-element-property :checkbox item))
@@ -2841,58 +3085,74 @@ CONTENTS is nil.  INFO is a plist holding contextual information."
 	 ((string= "listings" value) (org-html-list-of-listings info))
 	 ((string= "tables" value) (org-html-list-of-tables info))))))))
 
-;;;; Latex Environment
+;;;; LaTeX Environment
 
-(defun org-html-format-latex (latex-frag processing-type info)
-  "Format a LaTeX fragment LATEX-FRAG into HTML.
-PROCESSING-TYPE designates the tool used for conversion.  It can
-be `mathjax', `verbatim', `html', nil, t or symbols in
-`org-preview-latex-process-alist', e.g., `dvipng', `dvisvgm' or
-`imagemagick'.  See `org-html-with-latex' for more information.
-INFO is a plist containing export properties."
-  (let ((cache-relpath "") (cache-dir ""))
-    (unless (or (eq processing-type 'mathjax)
-                (eq processing-type 'html))
-      (let ((bfn (or (buffer-file-name)
-		     (make-temp-name
-		      (expand-file-name "latex" temporary-file-directory))))
-	    (latex-header
-	     (let ((header (plist-get info :latex-header)))
-	       (and header
-		    (concat (mapconcat
-			     (lambda (line) (concat "#+LATEX_HEADER: " line))
-			     (org-split-string header "\n")
-			     "\n")
-			    "\n")))))
-	(setq cache-relpath
-	      (concat (file-name-as-directory org-preview-latex-image-directory)
-		      (file-name-sans-extension
-		       (file-name-nondirectory bfn)))
-	      cache-dir (file-name-directory bfn))
-	;; Re-create LaTeX environment from original buffer in
-	;; temporary buffer so that dvipng/imagemagick can properly
-	;; turn the fragment into an image.
-	(setq latex-frag (concat latex-header latex-frag))))
-    (org-export-with-buffer-copy
-     (erase-buffer)
-     (insert latex-frag)
-     (org-format-latex cache-relpath nil nil cache-dir nil
-		       "Creating LaTeX Image..." nil processing-type)
-     (buffer-string))))
+(defun org-html-prepare-latex-images (parse-tree _backend info)
+  "Make sure that appropriate preview images exist for all LaTeX.
 
-(defun org-html--wrap-latex-environment (contents _ &optional caption label)
+Create a hash table containing preview images for all LaTeX
+fragments in PARSE-TREE, and add it to INFO.  Filter out
+fragments to be ignored according to INFO (see the INFO argument
+of `org-element-map').
+
+The keys of the hash table are elements and the values are lists
+containing image paths and metadata used for display."
+  (prog1 nil
+    (let ((processing-type (plist-get info :with-latex)))
+      (when (assq processing-type org-latex-preview-process-alist)
+        (let* ((image-options (plist-get info :html-latex-image-options))
+               (inline-condition (org-ensure-list
+                                  (plist-get image-options :inline)))
+               (image-type
+                (thread-first processing-type
+                              (alist-get org-latex-preview-process-alist)
+                              (plist-get :image-output-type)
+                              (intern)))
+               (element-preview-hash-table
+                (apply #'org-latex-preview-cache-images parse-tree info
+                       ;; Do not copy preview images to :image-dir if
+                       ;; inlining of images in html is requested
+                       (org-combine-plists
+                        image-options
+                        (and (memq image-type inline-condition)
+                             (list :image-dir nil))))))
+          (plist-put info :html-latex-preview-hash-table element-preview-hash-table))))))
+
+(defun org-html--as-latex (element info &optional content)
+  (let ((content (or content (org-element-property :value element))))
+    (pcase (plist-get info :with-latex)
+      ('verbatim ; Do nothing.
+       content)
+      ((or 't 'mathjax)
+       (cond ; Prepare for MathJax processing.
+        ((string-match-p "\\`\\$\\$" content)
+         (concat "\\[" (substring content 2 -2) "\\]"))
+        ((string-match-p "\\`\\$" content)
+         (concat "\\(" (substring content 1 -1) "\\)"))
+        (t content)))
+      ('html
+       (org-format-latex-as-html content))
+      ('mathml
+       (if-let ((path (org-mathml-convert-latex-cached content)))
+           (with-temp-buffer
+             (insert-file-contents path)
+             (buffer-string))
+         content))
+      ((and ptype (guard (assq ptype org-latex-preview-process-alist)))
+       (org-html-latex-image element info))
+      (processing-type
+       (warn "LaTeX fragment processor `%s' is unknown" processing-type)
+       content))))
+
+(defun org-html--wrap-latex-environment (contents &optional label)
   "Wrap CONTENTS string within appropriate environment for equations.
 When optional arguments CAPTION and LABEL are given, use them for
 caption and \"id\" attribute."
-  (format "\n<div%s class=\"equation-container\">\n%s%s\n</div>"
+  (format "\n<div%s class=\"equation-container\">\n%s\n</div>"
           ;; ID.
           (if (org-string-nw-p label) (format " id=\"%s\"" label) "")
           ;; Contents.
-          (format "<span class=\"equation\">\n%s\n</span>" contents)
-          ;; Caption.
-          (if (not (org-string-nw-p caption)) ""
-            (format "\n<span class=\"equation-label\">\n%s\n</span>"
-                    caption))))
+          (format "<span class=\"equation\">\n%s\n</span>" contents)))
 
 (defun org-html--math-environment-p (element &optional _)
   "Non-nil when ELEMENT is a LaTeX math environment.
@@ -2904,7 +3164,7 @@ used as a predicate for `org-export-get-ordinal' or a value to
                   (org-element-property :value element)))
 
 (defun org-html--latex-environment-numbered-p (element)
-  "Non-nil when ELEMENT contains a numbered LaTeX math environment.
+  "Non-nil when ELEMENT is a numbered LaTeX math environment.
 Starred and \"displaymath\" environments are not numbered."
   (not (string-match-p "\\`[ \t]*\\\\begin{\\(.*\\*\\|displaymath\\)}"
 		       (org-element-property :value element))))
@@ -2924,57 +3184,137 @@ For instance, change an `equation' environment to `equation*'."
   "Transcode a LATEX-ENVIRONMENT element from Org to HTML.
 CONTENTS is nil.  INFO is a plist holding contextual information."
   (let ((processing-type (plist-get info :with-latex))
-	(latex-frag (org-remove-indentation
-		     (org-element-property :value latex-environment)))
-        (attributes (org-export-read-attribute :attr_html latex-environment))
-        (label (org-html--reference latex-environment info t))
-        (caption (and (org-html--latex-environment-numbered-p latex-environment)
-		      (number-to-string
-		       (org-export-get-ordinal
-			latex-environment info nil
-			(lambda (l _)
-			  (and (org-html--math-environment-p l)
-			       (org-html--latex-environment-numbered-p l))))))))
-    (cond
-     ((memq processing-type '(t mathjax))
-      (org-html-format-latex
-       (if (org-string-nw-p label)
-	   (replace-regexp-in-string "\\`.*"
-				     (format "\\&\n\\\\label{%s}" label)
-				     latex-frag)
-	 latex-frag)
-       'mathjax info))
-     ((assq processing-type org-preview-latex-process-alist)
-      (let ((formula-link
-             (org-html-format-latex
-              (org-html--unlabel-latex-environment latex-frag)
-              processing-type info)))
-        (when (and formula-link (string-match "file:\\([^]]*\\)" formula-link))
-          (let ((source (org-export-file-uri (match-string 1 formula-link))))
-	    (org-html--wrap-latex-environment
-	     (org-html--format-image source attributes info)
-	     info caption label)))))
-     (t (org-html--wrap-latex-environment latex-frag info caption label)))))
+        (latex-frag (org-remove-indentation
+                     (org-element-property :value latex-environment)))
+        (label (org-html--reference latex-environment info t)))
+    (if (memq processing-type '(t mathjax))
+        (org-html--as-latex
+         latex-environment info
+         (if (org-string-nw-p label)
+             (replace-regexp-in-string "\\`.*"
+                                       (format "\\&\n\\\\label{%s}" label)
+                                       latex-frag)
+           latex-frag))
+      (org-html--wrap-latex-environment
+       (org-html--as-latex latex-environment info latex-frag)
+       label))))
 
-;;;; Latex Fragment
+;;;; LaTeX Fragment
 
 (defun org-html-latex-fragment (latex-fragment _contents info)
   "Transcode a LATEX-FRAGMENT object from Org to HTML.
 CONTENTS is nil.  INFO is a plist holding contextual information."
-  (let ((latex-frag (org-element-property :value latex-fragment))
-	(processing-type (plist-get info :with-latex)))
-    (cond
-     ((memq processing-type '(t mathjax))
-      (org-html-format-latex latex-frag 'mathjax info))
-     ((memq processing-type '(t html))
-      (org-html-format-latex latex-frag 'html info))
-     ((assq processing-type org-preview-latex-process-alist)
-      (let ((formula-link
-	     (org-html-format-latex latex-frag processing-type info)))
-	(when (and formula-link (string-match "file:\\([^]]*\\)" formula-link))
-	  (let ((source (org-export-file-uri (match-string 1 formula-link))))
-	    (org-html--format-image source nil info)))))
-     (t latex-frag))))
+  (org-html--as-latex latex-fragment info))
+
+(defun org-html-latex-image (element info)
+  "Transcode the LaTeX fragment or environment ELEMENT from Org to HTML.
+INFO is a plist holding contextual information, and it is assumed
+that an image for ELEMENT already exists within it."
+  (let* ((path-info
+          (or (gethash element (plist-get info :html-latex-preview-hash-table))
+              (prog1 nil
+                (org-display-warning
+                 (format "Expected LaTeX preview image to exist for element, but none found: %s"
+                         (string-replace "\n" " " (org-element-property :value element)))))))
+         (image-options (org-ensure-list (plist-get info :html-latex-image-options)))
+         (block-p (memq (aref (org-element-property :value element) 1) '(?$ ?\[)))
+         (image-source (if path-info (org-html-latex-image--data path-info info block-p) "")))
+    (if (and (eq (plist-get (cdr path-info) :image-type) 'svg)
+             (memq 'svg-embed (plist-get image-options :inline)))
+        image-source
+      (let ((scaling
+             (if (and (plist-get (cdr path-info) :height)
+                      (plist-get (cdr path-info) :depth))
+                 (org-html-latex-image--scaling path-info info)
+               (prog1 nil
+                 (org-display-warning
+                  (format "Missing geometry information for LaTeX preview image for element: %s"
+                          (string-replace "\n" " " (org-element-property :value element))))))))
+        (org-html-close-tag "img"
+          (org-html--make-attribute-string
+           (nconc
+            (list :src image-source
+                  :alt (org-html-encode-plain-text (org-element-property :value element))
+                  :style
+                  (if path-info
+                      (if scaling
+                          (if block-p
+                              (format "height: %.4fem; display: block" (plist-get scaling :height))
+                            (format "height: %.4fem; vertical-align: -%.4fem; display: inline-block"
+                                    (plist-get scaling :height) (plist-get scaling :depth)))
+                        (if block-p "display: block" "display: inline-block"))
+                    "color: red")
+                  :class (format "org-latex org-latex-%s" (if block-p "block" "inline")))
+            (unless path-info (list :title "LaTeX preview image not generated."))))
+          info)))))
+
+(defun org-html-latex-image--scaling (image-path-info info)
+  "Determine the appropriate (<height> . <depth>) of IMAGE-PATH-INFO given INFO."
+  (let* ((image-options (plist-get info :html-latex-image-options))
+         (rescale-factor (if (eq (plist-get (cdr image-path-info) :image-type) 'svg)
+                             (plist-get image-options :scale)
+                           1)))
+    (list :height (* rescale-factor (plist-get (cdr image-path-info) :height))
+          :depth (* rescale-factor (plist-get (cdr image-path-info) :depth)))))
+
+(defun org-html-latex-image--data (image-path-info info &optional block-p)
+  "Obtaine the image source for IMAGE-PATH-INFO as a string.
+This can take the form of a path, data URI, or <svg> element
+depending on HASH and INFO.  BLOCK-P signals that the image
+should be a block element."
+  (let* ((image-options (plist-get info :html-latex-image-options))
+         (inline-condition (org-ensure-list (plist-get image-options :inline)))
+         (image-format (plist-get (cdr image-path-info) :image-type))
+         (source-file (car image-path-info)))
+    (if (memq image-format inline-condition)
+     (let ((coding-system-for-read 'utf-8)
+           (file-name-handler-alist nil))
+       (with-temp-buffer
+         (insert-file-contents-literally source-file)
+         (cond
+          ((and (memq 'svg-embed inline-condition)
+                (eq image-format 'svg))
+           (goto-char (point-min))
+           (let ((svg-closing-tag (and (search-forward "<svg" nil t)
+                                       (search-forward ">" nil t))))
+
+             (dolist (search '("<!-- This file was generated by dvisvgm [^\n]+ -->"
+                               " height=['\"][^\"']+[\"']"
+                               " width=['\"][^\"']+[\"']"))
+               (goto-char (point-min))
+               (when (re-search-forward search svg-closing-tag t)
+                 (replace-match "")))
+             (goto-char (point-min))
+             (when (re-search-forward "viewBox=['\"][^\"']+[\"']" svg-closing-tag t)
+               (insert
+                " style=\""
+                (let ((scaling (org-html-latex-image--scaling image-path-info info)))
+                  (if block-p
+                      (format "height: %.4fem; display: block" (plist-get scaling :height))
+                    (format "height: %.4fem; vertical-align: -%.4fem; display: inline-block"
+                            (plist-get scaling :height) (plist-get scaling :depth))))
+                "\" class=\"org-latex org-latex-"
+                (if block-p "block" "inline")
+                "\"")))
+           (buffer-string))
+          ((eq image-format 'svg)
+           ;; Modelled after <https://codepen.io/tigt/post/optimizing-svgs-in-data-uris>.
+           (concat "data:image/svg+xml,"
+                   (url-hexify-string
+                    (subst-char-in-string ?\" ?\' (buffer-string))
+                    '(?a ?b ?c ?d ?e ?f ?g ?h ?i ?j ?k ?l ?m ?n
+                      ?o ?p ?q ?r ?s ?t ?u ?v ?w ?x ?y ?z ?A ?B
+                      ?C ?D ?E ?F ?G ?H ?I ?J ?K ?L ?M ?N ?O ?P
+                      ?Q ?R ?S ?T ?U ?V ?W ?X ?Y ?Z ?0 ?1 ?2 ?3
+                      ?4 ?5 ?6 ?7 ?8 ?9 ?- ?_ ?. ?~
+                      ;;Special additions
+                      ?\s ?= ?: ?/))))
+          (t
+           (base64-encode-region (point-min) (point-max))
+           (goto-char (point-min))
+           (insert "data:image/" (symbol-name image-format) ";base64,")
+           (buffer-string)))))
+     source-file)))
 
 ;;;; Line Break
 
@@ -2986,6 +3326,9 @@ CONTENTS is nil.  INFO is a plist holding contextual information."
 ;;;; Link
 
 (defun org-html-image-link-filter (data _backend info)
+"Process image links that are inside descriptions.
+DATA is the parse tree.  INFO is and info plist.
+See `org-export-insert-image-links' for more details."
   (org-export-insert-image-links data info org-html-inline-image-rules))
 
 (defun org-html-inline-image-p (link info)
@@ -3032,10 +3375,10 @@ images, set it to:
   (lambda (paragraph) (org-element-property :caption paragraph))"
   (let ((paragraph (pcase (org-element-type element)
 		     (`paragraph element)
-		     (`link (org-export-get-parent element)))))
-    (and (eq (org-element-type paragraph) 'paragraph)
+		     (`link (org-element-parent element)))))
+    (and (org-element-type-p paragraph 'paragraph)
 	 (or (not (and (boundp 'org-html-standalone-image-predicate)
-                       (fboundp org-html-standalone-image-predicate)))
+                     (fboundp org-html-standalone-image-predicate)))
 	     (funcall org-html-standalone-image-predicate paragraph))
 	 (catch 'exit
 	   (let ((link-count 0))
@@ -3062,20 +3405,19 @@ INFO is a plist holding contextual information.  See
 	  (lambda (raw-path info)
 	    ;; Treat links to `file.org' as links to `file.html', if
 	    ;; needed.  See `org-html-link-org-files-as-html'.
-	    (cond
-	     ((and (plist-get info :html-link-org-files-as-html)
-		   (string= ".org"
-			    (downcase (file-name-extension raw-path "."))))
-	      (concat (file-name-sans-extension raw-path) dot html-ext))
-	     (t raw-path))))
+            (save-match-data
+	      (cond
+	       ((and (plist-get info :html-link-org-files-as-html)
+                     (let ((case-fold-search t))
+                       (string-match "\\(.+\\)\\.org\\(?:\\.gpg\\)?$" raw-path)))
+	        (concat (match-string 1 raw-path) dot html-ext))
+	       (t raw-path)))))
 	 (type (org-element-property :type link))
 	 (raw-path (org-element-property :path link))
 	 ;; Ensure DESC really exists, or set it to nil.
 	 (desc (org-string-nw-p desc))
 	 (path
 	  (cond
-	   ((member type '("http" "https" "ftp" "mailto" "news"))
-	    (url-encode-url (concat type ":" raw-path)))
 	   ((string= "file" type)
 	    ;; During publishing, turn absolute file names belonging
 	    ;; to base directory into relative file names.  Otherwise,
@@ -3089,7 +3431,7 @@ INFO is a plist holding contextual information.  See
 			     (org-trim (plist-get info :html-link-home)))))
 	      (when (and home
 			 (plist-get info :html-link-use-abs-url)
-			 (file-name-absolute-p raw-path))
+			 (not (file-name-absolute-p raw-path)))
 		(setq raw-path (concat (file-name-as-directory home) raw-path))))
 	    ;; Maybe turn ".org" into ".html".
 	    (setq raw-path (funcall link-org-files-as-html-maybe raw-path info))
@@ -3102,16 +3444,16 @@ INFO is a plist holding contextual information.  See
 		  (concat raw-path
 			  "#"
 			  (org-publish-resolve-external-link option path t))))))
-	   (t raw-path)))
+	   (t (url-encode-url (concat type ":" raw-path)))))
 	 (attributes-plist
 	  (org-combine-plists
 	   ;; Extract attributes from parent's paragraph.  HACK: Only
 	   ;; do this for the first link in parent (inner image link
 	   ;; for inline images).  This is needed as long as
 	   ;; attributes cannot be set on a per link basis.
-	   (let* ((parent (org-export-get-parent-element link))
-		  (link (let ((container (org-export-get-parent link)))
-			  (if (and (eq 'link (org-element-type container))
+	   (let* ((parent (org-element-parent-element link))
+		  (link (let ((container (org-element-parent link)))
+			  (if (and (org-element-type-p container 'link)
 				   (org-html-inline-image-p link info))
 			      container
 			    link))))
@@ -3151,7 +3493,7 @@ INFO is a plist holding contextual information.  See
 	(pcase (org-element-type destination)
 	  ;; ID link points to an external file.
 	  (`plain-text
-	   (let ((fragment (concat "ID-" path))
+	   (let ((fragment (concat org-html--id-attr-prefix raw-path))
 		 ;; Treat links to ".org" files as ".html", if needed.
 		 (path (funcall link-org-files-as-html-maybe
 				destination info)))
@@ -3186,7 +3528,7 @@ INFO is a plist holding contextual information.  See
 	  (_
            (if (and destination
                     (memq (plist-get info :with-latex) '(mathjax t))
-                    (eq 'latex-environment (org-element-type destination))
+                    (org-element-type-p destination 'latex-environment)
                     (eq 'math (org-latex--environment-type destination)))
                ;; Caption and labels are introduced within LaTeX
 	       ;; environment.  Use "ref" or "eqref" macro, depending on user
@@ -3197,7 +3539,7 @@ INFO is a plist holding contextual information.  See
                     (org-html-standalone-image-predicate
                      #'org-html--has-caption-p)
                     (counter-predicate
-                     (if (eq 'latex-environment (org-element-type destination))
+                     (if (org-element-type-p destination 'latex-environment)
                          #'org-html--math-environment-p
                        #'org-html--has-caption-p))
                     (number
@@ -3206,7 +3548,7 @@ INFO is a plist holding contextual information.  See
 		      ((org-html-standalone-image-p destination info)
 		       (org-export-get-ordinal
 			(org-element-map destination 'link #'identity info t)
-			info 'link 'org-html-standalone-image-p))
+			info '(link) 'org-html-standalone-image-p))
 		      (t (org-export-get-ordinal
 			  destination info nil counter-predicate))))
                     (desc
@@ -3218,15 +3560,15 @@ INFO is a plist holding contextual information.  See
      ;; Coderef: replace link with the reference name or the
      ;; equivalent line number.
      ((string= type "coderef")
-      (let ((fragment (concat "coderef-" (org-html-encode-plain-text path))))
+      (let ((fragment (concat "coderef-" (org-html-encode-plain-text raw-path))))
 	(format "<a href=\"#%s\" %s%s>%s</a>"
 		fragment
 		(format "class=\"coderef\" onmouseover=\"CodeHighlightOn(this, \
 '%s');\" onmouseout=\"CodeHighlightOff(this, '%s');\""
 			fragment fragment)
 		attributes
-		(format (org-export-get-coderef-format path desc)
-			(org-export-resolve-coderef path info)))))
+		(format (org-export-get-coderef-format raw-path desc)
+			(org-export-resolve-coderef raw-path info)))))
      ;; External link with a description part.
      ((and path desc)
       (format "<a href=\"%s\"%s>%s</a>"
@@ -3258,7 +3600,7 @@ information."
   "Transcode a PARAGRAPH element from Org to HTML.
 CONTENTS is the contents of the paragraph, as a string.  INFO is
 the plist used as a communication channel."
-  (let* ((parent (org-export-get-parent paragraph))
+  (let* ((parent (org-element-parent paragraph))
 	 (parent-type (org-element-type parent))
 	 (style '((footnote-definition " class=\"footpara\"")
 		  (org-data " class=\"footpara\"")))
@@ -3270,7 +3612,7 @@ the plist used as a communication channel."
 	   (not (org-export-get-previous-element paragraph info))
 	   (let ((followers (org-export-get-next-element paragraph info 2)))
 	     (and (not (cdr followers))
-		  (memq (org-element-type (car followers)) '(nil plain-list)))))
+		  (org-element-type-p (car followers) '(nil plain-list)))))
       ;; First paragraph in an item has no tag if it is alone or
       ;; followed, at most, by a sub-list.
       contents)
@@ -3416,7 +3758,7 @@ holding contextual information."
   "Transcode a SECTION element from Org to HTML.
 CONTENTS holds the contents of the section.  INFO is a plist
 holding contextual information."
-  (let ((parent (org-export-get-parent-headline section)))
+  (let ((parent (org-element-lineage section 'headline)))
     ;; Before first headline: no container, just return CONTENTS.
     (if (not parent) contents
       ;; Get div's class and id references.
@@ -3485,32 +3827,32 @@ contextual information."
 	   (klipsify  (and  (plist-get info :html-klipsify-src)
                             (member lang '("javascript" "js"
 					   "ruby" "scheme" "clojure" "php" "html")))))
-      (if (not lang) (format "<pre class=\"example\"%s>\n%s</pre>" label code)
-	(format "<div class=\"org-src-container\">\n%s%s\n</div>"
-		;; Build caption.
-		(let ((caption (org-export-get-caption src-block)))
-		  (if (not caption) ""
-		    (let ((listing-number
-			   (format
-			    "<span class=\"listing-number\">%s </span>"
-			    (format
-			     (org-html--translate "Listing %d:" info)
-			     (org-export-get-ordinal
-			      src-block info nil #'org-html--has-caption-p)))))
-		      (format "<label class=\"org-src-name\">%s%s</label>"
-			      listing-number
-			      (org-trim (org-export-data caption info))))))
-		;; Contents.
-		(if klipsify
-		    (format "<pre><code class=\"src src-%s\"%s%s>%s</code></pre>"
-			    lang
-			    label
-			    (if (string= lang "html")
-				" data-editor-type=\"html\""
-			      "")
-			    code)
-		  (format "<pre class=\"src src-%s\"%s>%s</pre>"
-                          lang label code)))))))
+      (format "<div class=\"org-src-container\">\n%s%s\n</div>"
+	      ;; Build caption.
+	      (let ((caption (org-export-get-caption src-block)))
+		(if (not caption) ""
+		  (let ((listing-number
+			 (format
+			  "<span class=\"listing-number\">%s </span>"
+			  (format
+			   (org-html--translate "Listing %d:" info)
+			   (org-export-get-ordinal
+			    src-block info nil #'org-html--has-caption-p)))))
+		    (format "<label class=\"org-src-name\">%s%s</label>"
+			    listing-number
+			    (org-trim (org-export-data caption info))))))
+	      ;; Contents.
+	      (if klipsify
+		  (format "<pre><code class=\"src src-%s\"%s%s>%s</code></pre>"
+			  lang ; lang being nil is OK.
+			  label
+			  (if (string= lang "html")
+			      " data-editor-type=\"html\""
+			    "")
+			  code)
+		(format "<pre class=\"src src-%s\"%s>%s</pre>"
+                        ;; Lang being nil is OK.
+                        lang label code))))))
 
 ;;;; Statistics Cookie
 
@@ -3553,8 +3895,8 @@ contextual information."
   "Transcode a TABLE-CELL element from Org to HTML.
 CONTENTS is nil.  INFO is a plist used as a communication
 channel."
-  (let* ((table-row (org-export-get-parent table-cell))
-	 (table (org-export-get-parent-table table-cell))
+  (let* ((table-row (org-element-parent table-cell))
+	 (table (org-element-lineage table-cell 'table))
 	 (cell-attrs
 	  (if (not (plist-get info :html-table-align-individual-fields)) ""
 	    (format (if (and (boundp 'org-html-format-table-no-css)
@@ -3618,7 +3960,7 @@ communication channel."
 	     ((not (= 1 group)) '("<tbody>" . "\n</tbody>"))
 	     ;; Row is from first group.  Table has >=1 groups.
 	     ((org-export-table-has-header-p
-	       (org-export-get-parent-table table-row) info)
+	       (org-element-lineage table-row 'table) info)
 	      '("<thead>" . "\n</thead>"))
 	     ;; Row is from first and only group.
 	     (t '("<tbody>" . "\n</tbody>")))))
@@ -3645,7 +3987,7 @@ INFO is a plist used as a communication channel."
       (cdr (org-element-contents table-row)))))
 
 (defun org-html-table--table.el-table (table _info)
-  "Format table.el tables into HTML.
+  "Format table.el TABLE into HTML.
 INFO is a plist used as a communication channel."
   (when (eq (org-element-property :type table) 'table.el)
     (require 'table)
@@ -3775,10 +4117,11 @@ contextual information."
 ;;; Filter Functions
 
 (defun org-html-final-function (contents _backend info)
-  "Filter to indent the HTML and convert HTML entities."
+  "Filter to indent the HTML and convert HTML entities.
+CONTENTS is the exported HTML code.  INFO is the info plist."
   (with-temp-buffer
     (insert contents)
-    (set-auto-mode t)
+    (delay-mode-hooks (set-auto-mode t))
     (when (plist-get info :html-indent)
       (indent-region (point-min) (point-max)))
     (buffer-substring-no-properties (point-min) (point-max))))
@@ -3830,6 +4173,8 @@ itemized list in Org syntax in an HTML buffer and use this command
 to convert it."
   (interactive)
   (org-export-replace-region-by 'html))
+
+(defalias 'org-export-region-to-html #'org-html-convert-region-to-html)
 
 ;;;###autoload
 (defun org-html-export-to-html

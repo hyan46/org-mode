@@ -1,9 +1,10 @@
 ;;; org-macs.el --- Top-level Definitions for Org -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2004-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2004-2025 Free Software Foundation, Inc.
 
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Maintainer: Ihor Radchenko <yantar92 at posteo dot net>
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 ;;
 ;; This file is part of GNU Emacs.
@@ -33,22 +34,104 @@
 
 (require 'cl-lib)
 (require 'format-spec)
+(eval-when-compile (require 'subr-x))  ; For `when-let*', Emacs < 29
+
+;;; Org version verification.
+
+(defvar org--inhibit-version-check nil
+  "When non-nil, skip the detection of mixed-versions situations.
+For internal use only.  See Emacs bug #62762.
+This variable is only supposed to be changed by Emacs build scripts.
+When nil, Org tries to detect when Org source files were compiled with
+a different version of Org (which tends to lead to incorrect `.elc' files),
+or when the current Emacs session has loaded a mix of files from different
+Org versions (typically the one bundled with Emacs and another one installed
+from GNU ELPA), which can happen if some parts of Org were loaded before
+`load-path' was changed (e.g. before the GNU-ELPA-installed Org is activated
+by `package-activate-all').")
+(defmacro org-assert-version ()
+  "Assert compile time and runtime version match."
+  ;; We intentionally use a more permissive `org-release' instead of
+  ;; `org-git-version' to work around deficiencies in Elisp
+  ;; compilation after pulling latest changes.  Unchanged files will
+  ;; not be re-compiled and thus their macro-expanded
+  ;; `org-assert-version' calls would fail using strict
+  ;; `org-git-version' check because the generated Org version strings
+  ;; will not match.
+  `(unless (or ,org--inhibit-version-check (equal (org-release) ,(org-release)))
+     (warn "Org version mismatch.
+This warning usually appears when a built-in Org version is loaded
+prior to the more recent Org version.
+
+Version mismatch is commonly encountered in the following situations:
+
+1. Emacs is loaded using literate Org config and more recent Org
+   version is loaded inside the file loaded by `org-babel-load-file'.
+   `org-babel-load-file' triggers the built-in Org version clashing
+   the newer Org version attempt to be loaded later.
+
+   It is recommended to move the Org loading code before the
+   `org-babel-load-file' call.
+
+2. New Org version is loaded manually by setting `load-path', but some
+   other package depending on Org is loaded before the `load-path' is
+   configured.
+   This \"other package\" is triggering built-in Org version, again
+   causing the version mismatch.
+
+   It is recommended to set `load-path' as early in the config as
+   possible.
+
+3. New Org version is loaded using straight.el package manager and
+   other package depending on Org is loaded before straight triggers
+   loading of the newer Org version.
+
+   It is recommended to put
+
+    %s
+
+   early in the config.  Ideally, right after the straight.el
+   bootstrap.  Moving `use-package' :straight declaration may not be
+   sufficient if the corresponding `use-package' statement is
+   deferring the loading.
+
+4. A new Org version is synchronized with Emacs git repository and
+   stale .elc files are still left from the previous build.
+
+   It is recommended to remove .elc files from lisp/org directory and
+   re-compile."
+           ;; Avoid `warn' replacing "'" with "’" (see `format-message').
+           "(straight-use-package 'org)")))
+
+;; We rely on org-macs when generating Org version.  Checking Org
+;; version here will interfere with Org build process.
+;; (org-assert-version)
 
 (declare-function org-mode "org" ())
 (declare-function org-agenda-files "org" (&optional unrestricted archives))
+(declare-function org-time-string-to-seconds "org" (s))
 (declare-function org-fold-show-context "org-fold" (&optional key))
 (declare-function org-fold-save-outline-visibility "org-fold" (use-markers &rest body))
 (declare-function org-fold-next-visibility-change "org-fold" (&optional pos limit ignore-hidden-p previous-p))
 (declare-function org-fold-core-with-forced-fontification "org-fold" (&rest body))
 (declare-function org-fold-folded-p "org-fold" (&optional pos limit ignore-hidden-p previous-p))
-(declare-function string-collate-lessp "org-compat" (s1 s2 &optional locale ignore-case))
+(declare-function org-time-convert-to-list "org-compat" (time))
+(declare-function org-buffer-text-pixel-width "org-compat" ())
 
 (defvar org-ts-regexp0)
 (defvar ffap-url-regexp)
-(defvar org-fold-core-style)
 
 
 ;;; Macros
+
+(defmacro org-require-package (symbol &optional name noerror)
+  "Try to load library SYMBOL and display error otherwise.
+With optional parameter NAME, use NAME as package name instead of
+SYMBOL.  Show warning instead of error when NOERROR is non-nil."
+  `(unless (require ,symbol nil t)
+     (,(if noerror 'warn 'user-error)
+      "`%s' failed to load required package \"%s\""
+      this-command ,(or name symbol))))
 
 (defmacro org-with-gensyms (symbols &rest body)
   (declare (debug (sexp body)) (indent 1))
@@ -70,19 +153,37 @@
 	     ,@body)
 	 (set-buffer-modified-p ,was-modified)))))
 
-(defmacro org-with-point-at (pom &rest body)
-  "Move to buffer and point of point-or-marker POM for the duration of BODY."
+(defmacro org-with-base-buffer (buffer &rest body)
+  "Run BODY in base buffer for BUFFER.
+If BUFFER is nil, use base buffer for `current-buffer'."
+  (declare (debug (body)) (indent 1))
+  `(with-current-buffer (or (buffer-base-buffer ,buffer)
+                            (or ,buffer (current-buffer)))
+     ,@body))
+
+(defmacro org-with-point-at (epom &rest body)
+  "Move to buffer and point of EPOM for the duration of BODY.
+EPOM is an element, point, or marker."
   (declare (debug (form body)) (indent 1))
-  (org-with-gensyms (mpom)
-    `(let ((,mpom ,pom))
+  (require 'org-element-ast)
+  (org-with-gensyms (mepom)
+    `(let ((,mepom ,epom))
        (save-excursion
-	 (when (markerp ,mpom) (set-buffer (marker-buffer ,mpom)))
+         (cond
+          ((markerp ,mepom)
+           (set-buffer (marker-buffer ,mepom)))
+          ((numberp ,mepom))
+          (t
+           (when (org-element-property :buffer ,mepom)
+             (set-buffer (org-element-property :buffer ,mepom)))
+           (setq ,mepom (org-element-property :begin ,mepom))))
 	 (org-with-wide-buffer
-	  (goto-char (or ,mpom (point)))
+	  (goto-char (or ,mepom (point)))
 	  ,@body)))))
 
 (defmacro org-with-remote-undo (buffer &rest body)
-  "Execute BODY while recording undo information in two buffers."
+  "Execute BODY while recording undo information in current buffer and BUFFER.
+This function is only useful when called from Agenda buffer."
   (declare (debug (form body)) (indent 1))
   (org-with-gensyms (cline cmd buf1 buf2 undo1 undo2 c1 c2)
     `(let ((,cline (org-current-line))
@@ -114,7 +215,7 @@
 (defalias 'org-save-outline-visibility #'org-fold-save-outline-visibility)
 
 (defmacro org-with-wide-buffer (&rest body)
-  "Execute body while temporarily widening the buffer."
+  "Execute BODY while temporarily widening the buffer."
   (declare (debug (body)))
   `(save-excursion
      (save-restriction
@@ -132,7 +233,7 @@
      (let* ((org-called-with-limited-levels t)
             (org-outline-regexp (org-get-limited-outline-regexp))
             (outline-regexp org-outline-regexp)
-            (org-outline-regexp-bol (concat "^" org-outline-regexp)))
+            (org-outline-regexp-bol (org-get-limited-outline-regexp t)))
        ,@body)))
 
 (defmacro org-eval-in-environment (environment form)
@@ -168,11 +269,7 @@
             (unless modified
               (restore-buffer-modified-p nil))))))))
 
-(defmacro org-no-popups (&rest body)
-  "Suppress popup windows and evaluate BODY."
-  `(let (pop-up-frames pop-up-windows)
-     ,@body))
-
+;;;###autoload
 (defmacro org-element-with-disabled-cache (&rest body)
   "Run BODY without active org-element-cache."
   (declare (debug (form body)) (indent 0))
@@ -189,17 +286,36 @@
 	buffer)))
 
 (defun org-find-base-buffer-visiting (file)
-  "Like `find-buffer-visiting' but always return the base buffer and
-not an indirect buffer."
+  "Like `find-buffer-visiting' but always return the base buffer.
+FILE is the file name passed to `find-buffer-visiting'."
   (let ((buf (or (get-file-buffer file)
 		 (find-buffer-visiting file))))
     (org-base-buffer buf)))
 
-(defun org-switch-to-buffer-other-window (&rest args)
-  "Switch to buffer in a second window on the current frame.
-In particular, do not allow pop-up frames.
-Returns the newly created buffer."
-  (org-no-popups (apply #'switch-to-buffer-other-window args)))
+(defvar-local org-file-buffer-created nil
+  "Non-nil when current buffer is created from `org-with-file-buffer'.
+The value is FILE argument passed to `org-with-file-buffer'.")
+(defmacro org-with-file-buffer (file &rest body)
+  "Evaluate BODY with current buffer visiting FILE.
+When no live buffer is visiting FILE, create one and kill after
+evaluating BODY.
+During evaluation, when the buffer was created, `org-file-buffer-created'
+variable is set to FILE."
+  (declare (debug (form body)) (indent 1))
+  (org-with-gensyms (mark-function filename buffer)
+    `(let ((,mark-function (lambda () (setq-local org-file-buffer-created ,file)))
+           (,filename ,file)
+           ,buffer)
+       (add-hook 'find-file-hook ,mark-function)
+       (unwind-protect
+           (progn
+             (setq ,buffer (find-file-noselect ,filename t))
+             (with-current-buffer ,buffer
+               (prog1 (progn ,@body)
+                 (with-current-buffer ,buffer
+                   (when (equal ,filename org-file-buffer-created)
+                     (kill-buffer))))))
+         (remove-hook 'find-file-hook ,mark-function)))))
 
 (defun org-fit-window-to-buffer (&optional window max-height min-height
                                            shrink-only)
@@ -254,88 +370,315 @@ If EXCLUDE-TMP is non-nil, ignore temporary buffers."
 	       nil))
 	   (buffer-list)))))
 
+
+;;; Async stack
+
+(defvar org-async--stack nil
+  "List of async currently running task forms.
+Each running task is represented by a list with the following structure:
+  (%PROCESS :success %FUN :failure %FUN
+            :filter %FUN :buffer %BUFFER
+            :timeout %FLOAT :start-time %FLOAT
+            :info %SEXP)")
+
+(defvar org-async--wait-queue nil
+   "List of async queued task forms.
+Each queued task is represented by a list with the following structure:
+  (%PROCESS :success %FUN :failure %FUN
+            :filter %FUN :buffer %BUFFER
+            :info %SEXP :dir %STRING
+            :timeout %FLOAT :coding %SYMBOL)")
+
+(defvar org-async-process-limit 4
+  "Maximum number of processes to run at once.")
+
+(defvar org-async-timeout 120
+  "Default timeout for a process started via `org-async-queue'.")
+
+(defvar org-async-check-timeout-interval 1
+  "Check for processes which have exceeded their timeout every this many seconds.")
+
+(defvar org-async--counter 0)
+
+(cl-defun org-async-call (proc &key success failure filter buffer info timeout now process-variables
+                               (dir default-directory) (coding 'utf-8))
+  "Start PROC and register it with callbacks SUCCESS and FAILURE.
+
+PROC can be a process, string, or list.  A string will be run as
+a shell command, with `start-process-shell-command' and a list
+run using `start-process' with the car as the command and the cdr
+as the arguments.  The process will be executed in DIR (if set)
+or `default-directory'.
+
+There is also a \"special form\" of PROC, namely a list where the
+first item is the symbol org-async-task, and the rest constitutes
+an argument list for `org-async-call'.  This form allows for easy
+specification of callbacks that are themselves async tasks, e.g.
+  (org-async-call \\='(\"sleep 1\")
+                   :success \\='(org-async-task (\"notify-send\" \"done\")))
+When using this form, all other arguments are ignored.
+
+When BUFFER is provided, the output of PROC will be directed to it.
+Shoud BUFFER be t, then a temp buffer will be created and removed
+during `org-async--cleanup-process'.
+
+SUCCESS and FAILURE can be any form accepted by `org-async--execute-callback',
+namely:
+- A string, which is used a `message' string with the exit-code,
+  process-buffer, and INFO as arguments.
+- A function, which is called with exit-code, process-buffer,
+  and INFO as arguments.
+- An argument list for a new `org-async-call', whose first item is the
+  symbol org-async-task.
+- A list of callbacks, each of which is of any of the above.
+- nil, which does nothing.
+
+When PROC succeeds by exiting with an exit code of zero, the SUCCESS
+callback will be run.  Should PROC fail, or be killed, or the process
+runs for more than TIMEOUT seconds, the FAILURE callback will be run.
+
+A function FILTER can be provided, in which case it will be
+called in the same manner as a normal procecss filter, however
+the function FILTER will be called with INFO as a third argument.
+i.e. the call signature is (content new-content-string INFO)
+When BUFFER is non-nil, there are two other major differences:
+- The new content is silently inserted before FILTER is called
+  - Note that `point' is left alone and is not moved by this.
+- The process buffer is the current buffer when FILTER is called.
+
+When CODING is non-nil, both the process encode and decode system
+will be set to CODING.  If unset, UTF-8 is used.
+
+When NOW is non-nil, the PROC is started immediately, regardless
+of `org-async-process-limit'.
+
+For improved performance, PROCESS-VARIABLES is a list of
+let-style bindings that should be applied to the process.
+Variables are supported on an individual basis (i.e. only certain
+variables can be set), with the default value being equivalent to:
+
+  :process-variables ((process-adaptive-read-buffering nil)
+                      (process-connection-type nil)
+                      (read-process-output-max 65536))"
+  (cond
+   ;; Called with a task (as can be used with callbacks), so re-call
+   ;; with expanded arguments.
+   ((and (consp proc)
+         (eq (car proc) 'org-async-task))
+    (apply #'org-async-call (cdr proc)))
+   ;; Start the async process now.
+   ((or now (< (length org-async--stack) org-async-process-limit))
+    (let ((proc
+           (let ((default-directory (or dir default-directory))
+                 (process-adaptive-read-buffering ; No by default
+                  (cadr (or (assoc 'process-adaptive-read-buffering process-variables) nil)))
+                 (process-connection-type ; Use a pipe by default
+                  (cadr (or (assoc 'process-connection-type process-variables) nil)))
+                 (read-process-output-max ; Can be worth changing depending on the process
+                  (or (assq 'read-process-output-max process-variables) read-process-output-max)))
+             (cond ((processp proc) proc)
+                   ((stringp proc)
+                    (start-process-shell-command
+                     (format "org-async-%d" (cl-incf org-async--counter))
+                     buffer proc))
+                   ((consp proc)
+                    (apply #'start-process
+                           (format "org-async-%s-%d"
+                                   (car proc) (cl-incf org-async--counter))
+                           buffer proc))
+                   (t (error "Async process input %S not a recognised format"
+                             proc)))))
+          (timeout (or timeout org-async-timeout)))
+      (set-process-sentinel proc #'org-async--sentinel)
+      (when filter
+        (set-process-filter proc #'org-async--filter))
+      (when coding
+        (set-process-coding-system proc coding coding))
+      (push (list proc
+                  :success success
+                  :failure failure
+                  :filter filter
+                  :buffer (if (eq buffer t)
+                              (cons :temp (generate-new-buffer " *temp*" t))
+                            buffer)
+                  :info info
+                  :timeout timeout
+                  :start-time (float-time))
+            org-async--stack)
+      (org-async--monitor t)
+      (car org-async--stack)))
+   ;; Queue the task to be run later.
+   (t
+    (setq org-async--wait-queue
+          (append org-async--wait-queue
+                  (list (list proc
+                              :success success
+                              :failure failure
+                              :filter filter
+                              :buffer buffer
+                              :info info
+                              :dir dir
+                              :timeout timeout
+                              :coding coding))))
+    (last org-async--wait-queue))))
+
+(defvar org-async--blocking-tasks nil
+  "List of async tasks currently being waited on.")
+
+(defun org-async-wait-for (&rest tasks)
+  "Block until every task of TASKS has finished (including callback tasks)."
+  (setq org-async--blocking-tasks tasks)
+  (while org-async--blocking-tasks
+    (dolist (task org-async--blocking-tasks)
+      (accept-process-output (car task)))))
+
+(defun org-async--filter (process string)
+  "After PROCESS recieves STRING, call the async filter.
+This is implementated to satisfy the filter function documentation in
+`org-async-call'."
+  (when-let ((proc-info (alist-get process org-async--stack)))
+    (let ((filter (plist-get proc-info :filter))
+          (buffer (plist-get proc-info :buffer)))
+      (if buffer
+          (with-current-buffer buffer
+            (save-excursion
+              (goto-char (point-max))
+              (insert string))
+            (funcall filter process string (plist-get proc-info :info)))
+        (funcall filter process string (plist-get proc-info :info))))))
+
+(defun org-async--sentinel (process _signal)
+  "Watch PROCESS for death, and cleanup accordingly.
+When a signal is recieved, the status of PROCESS is checked.
+Should the it have an exit status, with status code 0,
+`org-async--cleanup-process' is run with the \"failed\" argument
+unset.  Should the process have finished in any other manner,
+`org-async--cleanup-process' is run with the \"failed\" argument."
+  (pcase (process-status process)
+    ((and 'exit (guard (= 0 (process-exit-status process))))
+     (org-async--cleanup-process process))
+    ((or 'exit 'signal 'failed)
+     (org-async--cleanup-process process 'failed))))
+
+(defun org-async--cleanup-process (process &optional failed)
+  "Remove PROCESS from the async stack, and run its callback.
+If the exit code of PROCESS is zero and FAILED is non-nil, then
+the success callback is run (via `org-async--execute-callback').
+Otherwise, the failure callback is run."
+  (when (assq process org-async--stack)
+    (let* ((proc-info (cdr (assq process org-async--stack)))
+           (buffer-val (plist-get proc-info :buffer))
+           (proc-buf (if (consp buffer-val) (cdr buffer-val) buffer-val))
+           (blocking-p (cl-member process org-async--blocking-tasks :key #'car)))
+      (setq org-async--stack
+            (delq (assq process org-async--stack) org-async--stack))
+      ;; Ensure that any filter is called on the final output
+      ;; prior to the callbacks.
+      (while (accept-process-output process))
+      (org-async--execute-callback
+       (plist-get
+        proc-info
+        (if (and (not failed)
+                 (= 0 (process-exit-status process)))
+            :success :failure))
+       (process-exit-status process)
+       proc-buf
+       (plist-get proc-info :info)
+       blocking-p)
+      (when blocking-p
+        (setq org-async--blocking-tasks
+              (cl-delete process org-async--blocking-tasks :key #'car)))
+      (when (and (consp buffer-val) (eq :temp (car buffer-val)))
+        (kill-buffer proc-buf)))
+    (when (and org-async--wait-queue
+               (< org-async-process-limit (length org-async--stack)))
+      (apply #'org-async-call (pop org-async--wait-queue)))))
+
+(defun org-async--execute-callback (callback exit-code process-buffer info &optional blocking)
+  "Run CALLBACK with EXIT-CODE, PROCESS-BUFFER, and INFO.
+CALLBACK can take one of four forms:
+- A string, which is used a `message' string with EXIT-CODE,
+  PROCESS-BUFFER, and INFO as arguments.
+- A function, which is called with EXIT-CODE, PROCESS-BUFFER,
+  and INFO as arguments.
+- A list, which is either:
+  - An (org-async-task ...) structure, which passed to an
+    `org-async-call' invocation.
+  - A list of callbacks, which are individually evaluated.
+- nil, which does nothing.
+
+When BLOCKING is set, all callback tasks are made blocking."
+  (cond
+   ((stringp callback)
+    (message callback exit-code process-buffer info))
+   ((functionp callback)
+    (funcall callback exit-code process-buffer info))
+   ((consp callback)
+    (if (eq (car callback) 'org-async-task)
+        (if blocking
+            (push (org-async-call callback) org-async--blocking-tasks)
+          (org-async-call callback))
+      (dolist (clbk callback)
+        (org-async--execute-callback clbk exit-code process-buffer info blocking))))
+   ((null callback)) ; Do nothing.
+   (t (message "Ignoring invalid `org-async-call' callback: %S" callback))))
+
+(defvar org-async--monitor-scheduled nil)
+(defun org-async--monitor (&optional force)
+  "Check each process against their timeouts, and kill any overdue.
+The only runs when `org-async--monitor-scheduled' is nil, unless FORCE is set.
+Should any processes still be alive after checking the stack, this will run
+itself using a timer in `org-async-check-timeout-interval' seconds."
+  (when (or force (null org-async--monitor-scheduled))
+    (dolist (stack-proc org-async--stack)
+      (if (process-live-p (car stack-proc))
+          (let ((timeout (plist-get (cdr stack-proc) :timeout)))
+            (when (and (numberp timeout)
+                       (< 0 timeout
+                          (- (float-time)
+                             (plist-get (cdr stack-proc) :start-time))))
+              (kill-process (car stack-proc))))
+        (org-async--cleanup-process (car stack-proc))))
+    (if org-async--stack
+        (setq org-async--monitor-scheduled
+              (run-at-time org-async-check-timeout-interval
+                           nil #'org-async--monitor t))
+      (setq org-async--monitor-scheduled nil))))
 
 
 ;;; File
 
 (defun org-file-newer-than-p (file time)
-  "Non-nil if FILE is newer than TIME.
-FILE is a filename, as a string, TIME is a list of integers, as
-returned by, e.g., `current-time'."
-  (and (file-exists-p file)
-       ;; Only compare times up to whole seconds as some file-systems
-       ;; (e.g. HFS+) do not retain any finer granularity.  As
-       ;; a consequence, make sure we return non-nil when the two
-       ;; times are equal.
-       (not (time-less-p (cl-subseq (nth 5 (file-attributes file)) 0 2)
-			 (cl-subseq time 0 2)))))
+  "Non-nil if FILE modification time is greater than TIME.
+TIME should be obtained earlier for the same FILE name using
 
-(defun org-compile-file (source process ext &optional err-msg log-buf spec)
-  "Compile a SOURCE file using PROCESS.
+  \(file-attribute-modification-time (file-attributes file))
 
-PROCESS is either a function or a list of shell commands, as
-strings.  EXT is a file extension, without the leading dot, as
-a string.  It is used to check if the process actually succeeded.
+If TIME is nil (file did not exist) then any existing FILE
+is considered as a newer one.  Some file systems have coarse
+timestamp resolution, for example 1 second on HFS+ or 2 seconds on FAT,
+so nil may be returned when file is updated twice within a short period
+of time.  File timestamp and system clock `current-time' may have
+different resolution, so attempts to compare them may give unexpected
+results.
 
-PROCESS must create a file with the same base name and directory
-as SOURCE, but ending with EXT.  The function then returns its
-filename.  Otherwise, it raises an error.  The error message can
-then be refined by providing string ERR-MSG, which is appended to
-the standard message.
-
-If PROCESS is a function, it is called with a single argument:
-the SOURCE file.
-
-If it is a list of commands, each of them is called using
-`shell-command'.  By default, in each command, %b, %f, %F, %o and
-%O are replaced with, respectively, SOURCE base name, name, full
-name, directory and absolute output file name.  It is possible,
-however, to use more place-holders by specifying them in optional
-argument SPEC, as an alist following the pattern
-
-  (CHARACTER . REPLACEMENT-STRING).
-
-When PROCESS is a list of commands, optional argument LOG-BUF can
-be set to a buffer or a buffer name.  `shell-command' then uses
-it for output."
-  (let* ((base-name (file-name-base source))
-	 (full-name (file-truename source))
-	 (out-dir (or (file-name-directory source) "./"))
-	 (output (expand-file-name (concat base-name "." ext) out-dir))
-	 (time (current-time))
-	 (err-msg (if (stringp err-msg) (concat ".  " err-msg) "")))
-    (save-window-excursion
-      (pcase process
-	((pred functionp) (funcall process (shell-quote-argument source)))
-	((pred consp)
-	 (let ((log-buf (and log-buf (get-buffer-create log-buf)))
-	       (spec (append spec
-			     `((?b . ,(shell-quote-argument base-name))
-			       (?f . ,(shell-quote-argument source))
-			       (?F . ,(shell-quote-argument full-name))
-			       (?o . ,(shell-quote-argument out-dir))
-			       (?O . ,(shell-quote-argument output))))))
-           ;; Combine output of all commands in PROCESS.
-           (with-current-buffer log-buf
-             (let (buffer-read-only)
-               (erase-buffer)))
-           (let ((shell-command-dont-erase-buffer t))
-	     (dolist (command process)
-	       (shell-command (format-spec command spec) log-buf)))
-	   (when log-buf (with-current-buffer log-buf (compilation-mode)))))
-	(_ (error "No valid command to process %S%s" source err-msg))))
-    ;; Check for process failure.  Output file is expected to be
-    ;; located in the same directory as SOURCE.
-    (unless (org-file-newer-than-p output time)
-      (error (format "File %S wasn't produced%s" output err-msg)))
-    output))
-
+Consider `file-newer-than-file-p' to check up to date state
+in target-prerequisite files relation."
+  (let ((mtime (file-attribute-modification-time (file-attributes file))))
+    (and mtime (or (not time) (time-less-p time mtime)))))
 
 
 ;;; Indentation
 
+(defmacro org-current-text-indentation ()
+  "Like `current-indentation', but ignore display/invisible properties."
+  `(let ((buffer-invisibility-spec nil))
+     (current-indentation)))
+
 (defun org-do-remove-indentation (&optional n skip-fl)
   "Remove the maximum common indentation from the buffer.
+Do not consider invisible text when calculating indentation.
+
 When optional argument N is a positive integer, remove exactly
 that much characters from indentation, if possible.  When
 optional argument SKIP-FL is non-nil, skip the first
@@ -348,7 +691,7 @@ line.  Return nil if it fails."
 		   (save-excursion
                      (when skip-fl (forward-line))
 		     (while (re-search-forward "^[ \t]*\\S-" nil t)
-		       (let ((ind (current-indentation)))
+		       (let ((ind (org-current-text-indentation)))
 			 (if (zerop ind) (throw :exit nil)
 			   (setq min-ind (min min-ind ind))))))
 		   min-ind))))
@@ -356,10 +699,14 @@ line.  Return nil if it fails."
 	;; Remove exactly N indentation, but give up if not possible.
         (when skip-fl (forward-line))
 	(while (not (eobp))
-	  (let ((ind (progn (skip-chars-forward " \t") (current-column))))
-	    (cond ((eolp) (delete-region (line-beginning-position) (point)))
-		  ((< ind n) (throw :exit nil))
-		  (t (indent-line-to (- ind n))))
+	  (let* ((buffer-invisibility-spec nil) ; do not treat invisible text specially
+                 (ind (progn (skip-chars-forward " \t") (current-column))))
+	    (cond ((< ind n)
+                   (if (eolp) (delete-region (line-beginning-position) (point))
+                     (throw :exit nil)))
+		  (t (delete-region (line-beginning-position)
+                                    (progn (move-to-column n t)
+                                           (point)))))
 	    (forward-line)))
 	;; Signal success.
 	t))))
@@ -378,7 +725,7 @@ error when the user input is empty."
 	  (allow-empty? nil)
 	  (t (user-error "Empty input is not valid")))))
 
-(declare-function org-time-stamp-inactive "org" (&optional arg))
+(declare-function org-timestamp-inactive "org" (&optional arg))
 
 (defun org-completing-read (&rest args)
   "Completing-read with SPACE being a normal character."
@@ -388,7 +735,7 @@ error when the user input is empty."
     (define-key minibuffer-local-completion-map " " #'self-insert-command)
     (define-key minibuffer-local-completion-map "?" #'self-insert-command)
     (define-key minibuffer-local-completion-map (kbd "C-c !")
-      #'org-time-stamp-inactive)
+                #'org-timestamp-inactive)
     (apply #'completing-read args)))
 
 (defun org--mks-read-key (allowed-keys prompt navigation-keys)
@@ -437,7 +784,7 @@ alist with (\"key\" \"description\") entries.  When one of these
 is selected, only the bare key is returned."
   (save-window-excursion
     (let ((inhibit-quit t)
-	  (buffer (org-switch-to-buffer-other-window "*Org Select*"))
+	  (buffer (switch-to-buffer-other-window "*Org Select*"))
 	  (prompt (or prompt "Select: "))
 	  case-fold-search
 	  current)
@@ -501,7 +848,10 @@ is selected, only the bare key is returned."
 		   ;; selection prefix.
 		   ((assoc current specials) (throw 'exit current))
 		   (t (error "No entry available")))))))
-	(when buffer (kill-buffer buffer))))))
+        (when buffer
+          (when-let* ((window (get-buffer-window buffer t)))
+            (quit-window 'kill window))
+          (kill-buffer buffer))))))
 
 
 ;;; List manipulation
@@ -598,7 +948,14 @@ ones and overrule settings in the other lists."
     org-element--cache-diagnostics-ring-size
     org-element--cache-sync-keys
     org-element--cache-sync-requests
-    org-element--cache-sync-timer)
+    org-element--cache-sync-timer
+    ;; FIXME: Avoid copying `buffer-file-name' - when closing a
+    ;; temporary buffer, org-persist badly interacts with multiple
+    ;; _different_ buffers with the same `buffer-file-name' and may
+    ;; modify (via `org-element--cache-persist-before-write' by side
+    ;; effect the cache in a _different_ buffer (whatever comes first
+    ;; in `get-file-buffer').
+    buffer-file-name)
   "List of local variables that cannot be transferred to another buffer.")
 
 (defun org-get-local-variables ()
@@ -683,46 +1040,100 @@ get an unnecessary O(N²) space complexity, so you're usually better off using
 
 (defun org-eval (form)
   "Eval FORM and return result."
-  (condition-case error
+  (condition-case-unless-debug error
       (eval form t)
     (error (format "%%![Error: %s]" error))))
 
+(defvar org--headline-re-cache-no-bol nil
+  "Plist holding association between headline level regexp.")
+(defvar org--headline-re-cache-bol nil
+  "Plist holding association between headline level regexp.")
+(defsubst org-headline-re (true-level &optional no-bol)
+  "Generate headline regexp for TRUE-LEVEL.
+When NO-BOL is non-nil, regexp will not demand the regexp to start at
+beginning of line."
+  (or (plist-get
+       (if no-bol
+           org--headline-re-cache-no-bol
+         org--headline-re-cache-bol)
+       true-level)
+      (let ((re (rx-to-string
+                 (if no-bol
+                     `(seq (** 1 ,true-level "*") " ")
+                   `(seq line-start (** 1 ,true-level "*") " ")))))
+        (if no-bol
+            (setq org--headline-re-cache-no-bol
+                  (plist-put
+                   org--headline-re-cache-no-bol
+                   true-level re))
+          (setq org--headline-re-cache-bol
+                (plist-put
+                 org--headline-re-cache-bol
+                 true-level re)))
+        re)))
+
 (defvar org-outline-regexp) ; defined in org.el
+(defvar org-outline-regexp-bol) ; defined in org.el
 (defvar org-odd-levels-only) ; defined in org.el
 (defvar org-inlinetask-min-level) ; defined in org-inlinetask.el
-(defun org-get-limited-outline-regexp ()
+(defun org-get-limited-outline-regexp (&optional with-bol)
   "Return outline-regexp with limited number of levels.
-The number of levels is controlled by `org-inlinetask-min-level'."
+The number of levels is controlled by `org-inlinetask-min-level'.
+Match at beginning of line when WITH-BOL is non-nil."
   (cond ((not (derived-mode-p 'org-mode))
-	 outline-regexp)
+         (if (string-prefix-p "^" outline-regexp)
+             (if with-bol outline-regexp (substring outline-regexp 1))
+           (if with-bol (concat "^" outline-regexp) outline-regexp)))
 	((not (featurep 'org-inlinetask))
-	 org-outline-regexp)
+	 (if with-bol org-outline-regexp-bol org-outline-regexp))
 	(t
 	 (let* ((limit-level (1- org-inlinetask-min-level))
 		(nstars (if org-odd-levels-only
 			    (1- (* limit-level 2))
 			  limit-level)))
-	   (format "\\*\\{1,%d\\} " nstars)))))
+           (org-headline-re nstars (not with-bol))))))
 
 (defun org--line-empty-p (n)
-  "Is the Nth next line empty?
-Counts the current line as N = 1 and the previous line as N = 0;
-see `beginning-of-line'."
+  "Is the Nth next line empty?"
   (and (not (bobp))
        (save-excursion
-	 (beginning-of-line n)
-	 (looking-at-p "[ \t]*$"))))
+	 (forward-line n)
+         (skip-chars-forward " \t")
+         (eolp))))
 
 (defun org-previous-line-empty-p ()
   "Is the previous line a blank line?
 When NEXT is non-nil, check the next line instead."
-  (org--line-empty-p 0))
+  (org--line-empty-p -1))
 
 (defun org-next-line-empty-p ()
   "Is the previous line a blank line?
 When NEXT is non-nil, check the next line instead."
-  (org--line-empty-p 2))
+  (org--line-empty-p 1))
 
+(defun org-id-uuid ()
+  "Return string with random (version 4) UUID."
+  (let ((rnd (md5 (format "%s%s%s%s%s%s%s"
+			  (random)
+			  (org-time-convert-to-list nil)
+			  (user-uid)
+			  (emacs-pid)
+			  (user-full-name)
+			  user-mail-address
+			  (recent-keys)))))
+    (format "%s-%s-4%s-%s%s-%s"
+	    (substring rnd 0 8)
+	    (substring rnd 8 12)
+	    (substring rnd 13 16)
+	    (format "%x"
+		    (logior
+		     #b10000000
+		     (logand
+		      #b10111111
+		      (string-to-number
+		       (substring rnd 16 18) 16))))
+	    (substring rnd 18 20)
+	    (substring rnd 20 32))))
 
 
 ;;; Motion
@@ -789,14 +1200,14 @@ Return nil when PROP is not set at POS."
        (<= (match-beginning n) pos)
        (>= (match-end n) pos)))
 
-(defun org-skip-whitespace ()
+(defsubst org-skip-whitespace ()
   "Skip over space, tabs and newline characters."
   (skip-chars-forward " \t\n\r"))
 
 (defun org-match-line (regexp)
   "Match REGEXP at the beginning of the current line."
   (save-excursion
-    (beginning-of-line)
+    (forward-line 0)
     (looking-at regexp)))
 
 (defun org-match-any-p (re list)
@@ -818,7 +1229,7 @@ match."
     (let ((pos (point))
           (eol (line-end-position (if nlines (1+ nlines) 1))))
       (save-excursion
-	(beginning-of-line (- 1 (or nlines 0)))
+	(forward-line (- (or nlines 0)))
 	(while (and (re-search-forward regexp eol t)
 		    (<= (match-beginning 0) pos))
 	  (let ((end (match-end 0)))
@@ -842,23 +1253,79 @@ return nil."
   (require 'ffap)
   (and ffap-url-regexp (string-match-p ffap-url-regexp s)))
 
+(defconst org-uuid-regexp
+  "\\`[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}\\'"
+  "Regular expression matching a universal unique identifier (UUID).")
+
+(defun org-uuidgen-p (s)
+  "Is S an ID created by UUIDGEN?"
+  (string-match org-uuid-regexp (downcase s)))
+
+
 
 ;;; String manipulation
 
-(defun org-string< (a b)
-  (string-collate-lessp a b))
+(defcustom org-sort-function #'string-collate-lessp
+  "Function used to compare strings when sorting.
+This function affects how Org mode sorts headlines, agenda items,
+table lines, etc.
 
-(defun org-string<= (a b)
-  (or (string= a b) (string-collate-lessp a b)))
+The function must accept either 2 or 4 arguments: strings to compare
+and, optionally, LOCALE and IGNORE-CASE - locale name and flag to make
+comparison case-insensitive.
 
-(defun org-string>= (a b)
-  (not (string-collate-lessp a b)))
+The default value uses sorting rules according to OS language.  Users
+who want to make sorting language-independent, may customize the value
+to `org-sort-function-fallback'.
 
-(defun org-string> (a b)
+Note that some string sorting rules are known to be not accurate on
+MacOS.  See https://debbugs.gnu.org/cgi/bugreport.cgi?bug=59275.
+MacOS users may customize the value to
+`org-sort-function-fallback'."
+  :group 'org
+  :package-version '(Org . "9.7")
+  :type '(choice
+          (const :tag "According to OS language" string-collate-lessp)
+          (const :tag "Using string comparison" org-sort-function-fallback)
+          (function :tag "Custom function")))
+
+(defun org-sort-function-fallback (a b &optional _ ignore-case)
+  "Return non-nil when downcased string A < string B.
+Use `compare-strings' for comparison.  Honor IGNORE-CASE."
+  (let ((ans (compare-strings a nil nil b nil nil ignore-case)))
+    (cond
+     ((and (numberp ans) (< ans 0)) t)
+     (t nil))))
+
+(defun org-string< (a b &optional locale ignore-case)
+  "Return non-nil when string A < string B.
+LOCALE is the locale name.  IGNORE-CASE, when non-nil, makes comparison
+ignore case."
+  (if (= 4 (cdr (func-arity org-sort-function)))
+      (funcall org-sort-function a b locale ignore-case)
+    (funcall org-sort-function a b)))
+
+(defun org-string<= (a b &optional locale ignore-case)
+  "Return non-nil when string A <= string B.
+LOCALE is the locale name.  IGNORE-CASE, when non-nil, makes comparison
+ignore case."
+  (or (string= a b) (org-string< a b locale ignore-case)))
+
+(defun org-string>= (a b &optional locale ignore-case)
+  "Return non-nil when string A >= string B.
+LOCALE is the locale name.  IGNORE-CASE, when non-nil, makes comparison
+ignore case."
+  (not (org-string< a b locale ignore-case)))
+
+(defun org-string> (a b &optional locale ignore-case)
+  "Return non-nil when string A > string B.
+LOCALE is the locale name.  IGNORE-CASE, when non-nil, makes comparison
+ignore case."
   (and (not (string= a b))
-       (not (string-collate-lessp a b))))
+       (not (org-string< a b locale ignore-case))))
 
 (defun org-string<> (a b)
+  "Return non-nil when string A and string B are not equal."
   (not (string= a b)))
 
 (defsubst org-trim (s &optional keep-lead)
@@ -884,7 +1351,7 @@ Otherwise, return nil."
   "Splits STRING into substrings at SEPARATORS.
 
 SEPARATORS is a regular expression.  When nil, it defaults to
-\"[ \f\t\n\r\v]+\".
+\"[ \\f\\t\\n\\r\\v]+\".
 
 Unlike `split-string', matching SEPARATORS at the beginning and
 end of string are ignored."
@@ -967,15 +1434,18 @@ Results may be off sometimes if it cannot handle a given
 `display' value."
   (org--string-from-props string 'display 0 (length string)))
 
-(defun org-string-width (string &optional pixels)
+(defun org-string-width (string &optional pixels default-face)
   "Return width of STRING when displayed in the current buffer.
-Return width in pixels when PIXELS is non-nil."
+Return width in pixels when PIXELS is non-nil.
+When PIXELS is nil, DEFAULT-FACE is the face used to calculate relative
+STRING width.  When REFERENCE-FACE is nil, `default' face is used."
   (if (and (version< emacs-version "28") (not pixels))
       ;; FIXME: Fallback to old limited version, because
       ;; `window-pixel-width' is buggy in older Emacs.
       (org--string-width-1 string)
-    ;; Wrap/line prefix will make `window-text-pizel-size' return too
+    ;; Wrap/line prefix will make `window-text-pixel-size' return too
     ;; large value including the prefix.
+    (setq string (copy-sequence string)) ; do not modify STRING object
     (remove-text-properties 0 (length string)
                             '(wrap-prefix t line-prefix t)
                             string)
@@ -984,7 +1454,7 @@ Return width in pixels when PIXELS is non-nil."
     ;; is critical to get right string width from pixel width (not needed
     ;; when PIXELS are requested though).
     (unless pixels
-      (remove-text-properties 0 (length string) '(face t) string))
+      (put-text-property 0 (length string) 'face (or default-face 'default) string))
     (let (;; We need to remove the folds to make sure that folded table
           ;; alignment is not messed up.
           (current-invisibility-spec
@@ -1004,12 +1474,14 @@ Return width in pixels when PIXELS is non-nil."
                      (push el result)))
                  result)))
           (current-char-property-alias-alist char-property-alias-alist))
-      (with-temp-buffer
+      (with-current-buffer (get-buffer-create " *Org string width*")
         (setq-local display-line-numbers nil)
+        (setq-local line-prefix nil)
+        (setq-local wrap-prefix nil)
         (setq-local buffer-invisibility-spec
                     (if (listp current-invisibility-spec)
                         (mapcar (lambda (el)
-                                  ;; Consider elipsis to have 0 width.
+                                  ;; Consider ellipsis to have 0 width.
                                   ;; It is what Emacs 28+ does, but we have
                                   ;; to force it in earlier Emacs versions.
                                   (if (and (consp el) (cdr el))
@@ -1021,31 +1493,28 @@ Return width in pixels when PIXELS is non-nil."
                     current-char-property-alias-alist)
         (let (pixel-width symbol-width)
           (with-silent-modifications
-            (setf (buffer-string) string)
-            (setq pixel-width
-                  (if (get-buffer-window (current-buffer))
-                      (car (window-text-pixel-size
-                            nil (line-beginning-position) (point-max)))
-                    (set-window-buffer nil (current-buffer))
-                    (car (window-text-pixel-size
-                          nil (line-beginning-position) (point-max)))))
+            (erase-buffer)
+            (insert string)
+            (setq pixel-width (org-buffer-text-pixel-width))
             (unless pixels
-              (setf (buffer-string) "a")
-              (setq symbol-width
-                    (if (get-buffer-window (current-buffer))
-                        (car (window-text-pixel-size
-                              nil (line-beginning-position) (point-max)))
-                      (set-window-buffer nil (current-buffer))
-                      (car (window-text-pixel-size
-                            nil (line-beginning-position) (point-max)))))))
+              (erase-buffer)
+              (insert (propertize "a" 'face (or default-face 'default)))
+              (setq symbol-width (org-buffer-text-pixel-width))))
           (if pixels
               pixel-width
-            (/ pixel-width symbol-width)))))))
+            (round pixel-width symbol-width)))))))
 
 (defmacro org-current-text-column ()
-  "Like `current-column' but ignore display properties."
-  `(string-width (buffer-substring-no-properties
-                  (line-beginning-position) (point))))
+  "Like `current-column' but ignore display properties.
+Throw an error when `tab-width' is not 8.
+
+This function forces `tab-width' value because it is used as a part of
+the parser, to ensure parser consistency when calculating list
+indentation."
+  `(progn
+     (unless (= 8 tab-width) (error "Tab width in Org files must be 8, not %d.  Please adjust your `tab-width' settings for Org mode" tab-width))
+     (string-width (buffer-substring-no-properties
+                    (line-beginning-position) (point)))))
 
 (defun org-not-nil (v)
   "If V not nil, and also not the string \"nil\", then return V.
@@ -1060,7 +1529,8 @@ removed.  Return the new string.  If STRING is nil, return nil."
   (and string
        (if (and (string-prefix-p pre string)
 		(string-suffix-p post string))
-	   (substring string (length pre) (- (length post)))
+	   (substring string (length pre)
+                      (and (not (string-equal "" post)) (- (length post))))
 	 string)))
 
 (defun org-strip-quotes (string)
@@ -1104,6 +1574,10 @@ Assumes that s is a single line, starting in column 0."
 		 (match-beginning 0)) ?\ )
 	     t t s)))
   s)
+
+(defun org-remove-blank-lines (s)
+  "Remove blank lines in S."
+  (replace-regexp-in-string (rx "\n" (1+ (0+ space) "\n")) "\n" s))
 
 (defun org-wrap (string &optional width lines)
   "Wrap string to either a number of lines, or a width in characters.
@@ -1176,7 +1650,7 @@ so values can contain further %-escapes if they are define later in TABLE."
       (setq re (concat "%-?[0-9.]*" (substring (car e) 1)))
       (when (and (cdr e) (string-match re (cdr e)))
         (let ((sref (substring (cdr e) (match-beginning 0) (match-end 0)))
-              (safe "SREF"))
+              (safe (copy-sequence "SREF")))
           (add-text-properties 0 3 (list 'sref sref) safe)
           (setcdr e (replace-match safe t t (cdr e)))))
       (while (string-match re string)
@@ -1201,7 +1675,7 @@ so values can contain further %-escapes if they are define later in TABLE."
   "Return fontified region between BEG and END."
   (when (bound-and-true-p jit-lock-mode)
     (when (text-property-not-all beg end 'fontified t)
-      (save-match-data (font-lock-fontify-region beg end))))
+      (save-excursion (save-match-data (font-lock-fontify-region beg end)))))
   (buffer-substring beg end))
 
 (defun org-looking-at-fontified (re)
@@ -1211,9 +1685,10 @@ so values can contain further %-escapes if they are define later in TABLE."
       (when (text-property-not-all
              (match-beginning 0) (match-end 0)
              'fontified t)
-        (save-match-data
-          (font-lock-fontify-region (match-beginning 0)
-                            (match-end 0)))))))
+        (save-excursion
+          (save-match-data
+            (font-lock-fontify-region (match-beginning 0)
+                              (match-end 0))))))))
 
 (defsubst org-no-properties (s &optional restricted)
   "Remove all text properties from string S.
@@ -1231,23 +1706,22 @@ that will be added to PLIST.  Returns the string that was modified."
    0 (length string) (if props (append plist props) plist) string)
   string)
 
-(defun org-make-parameter-alist (flat)
-  ;; FIXME: "flat" is called a "plist"!
-  "Return alist based on FLAT.
-FLAT is a list with alternating symbol names and values.  The
-returned alist is a list of lists with the symbol name in car and
-the value in cadr."
-  (when flat
-    (cons (list (car flat) (cadr flat))
-	  (org-make-parameter-alist (cddr flat)))))
+(defun org-make-parameter-alist (plist)
+  "Return alist based on PLIST.
+PLIST is a property list with alternating symbol names and values.
+The returned alist is a list of lists with the symbol name in `car'
+and the value in `cadr'."
+  (when plist
+    (cons (list (car plist) (cadr plist))
+	  (org-make-parameter-alist (cddr plist)))))
 
 (defsubst org-get-at-bol (property)
   "Get text property PROPERTY at the beginning of line."
-  (get-text-property (point-at-bol) property))
+  (get-text-property (line-beginning-position) property))
 
 (defun org-get-at-eol (property n)
   "Get text property PROPERTY at the end of line less N characters."
-  (get-text-property (- (point-at-eol) n) property))
+  (get-text-property (- (line-end-position) n) property))
 
 (defun org-find-text-property-in-string (prop s)
   "Return the first non-nil value of property PROP in string S."
@@ -1431,6 +1905,9 @@ Return 0. if S is not recognized as a valid value."
        ((string-match org-ts-regexp0 s) (org-2ft s))
        (t 0.)))))
 
+
+;;; Misc
+
 (defun org-scroll (key &optional additional-keys)
   "Receive KEY and scroll the current window accordingly.
 When ADDITIONAL-KEYS is not nil, also include SPC and DEL in the
@@ -1466,6 +1943,158 @@ BASE is the maximum bitcount.
 Credit: https://stackoverflow.com/questions/11871245/knuth-multiplicative-hash#41537995"
   (cl-assert (and (<= 0 base 32)))
   (ash (* number 2654435769) (- base 32)))
+
+(defvar org-sxhash-hashes (make-hash-table :weakness 'key :test 'equal))
+(defvar org-sxhash-objects (make-hash-table :weakness 'value))
+(defun org-sxhash-safe (obj &optional counter)
+  "Like `sxhash' for OBJ, but collision-free for in-memory objects.
+When COUNTER is non-nil, return safe hash for (COUNTER . OBJ)."
+  ;; Note: third-party code may modify OBJ by side effect.
+  ;; Should not affect anything as long as `org-sxhash-safe'
+  ;; is used to calculate hash.
+  (or (and (not counter) (gethash obj org-sxhash-hashes))
+      (let* ((hash (sxhash (if counter (cons counter obj) obj)))
+	     (obj-old (gethash hash org-sxhash-objects)))
+	(if obj-old ; collision
+	    (org-sxhash-safe obj (if counter (1+ counter) 1))
+	  ;; No collision.  Remember and return normal hash.
+	  (puthash hash obj org-sxhash-objects)
+	  (puthash obj hash org-sxhash-hashes)))))
+
+(defun org-compile-file (source process ext &optional err-msg log-buf spec)
+  "Compile a SOURCE file using PROCESS.
+
+See `org-compile-file-commands' for information on PROCESS, EXT, and SPEC.
+If PROCESS fails, an error will be raised.  The error message can
+then be refined by providing string ERR-MSG, which is appended to
+the standard message.
+
+PROCESS must create a file with the same base name and directory
+as SOURCE, but ending with EXT.  The function then returns its
+filename.  Otherwise, it raises an error.
+
+When PROCESS is a list of commands, optional argument LOG-BUF can
+be set to a buffer or a buffer name.  `shell-command' then uses
+it for output."
+  (let* ((commands (org-compile-file-commands source process ext spec err-msg))
+         (output (concat (file-name-sans-extension source) "." ext))
+         ;; Resolve symlinks in default-directory to correctly handle
+         ;; absolute source paths or relative paths with ..
+         (relname (if (file-name-absolute-p source)
+                      (let ((pwd (file-truename default-directory)))
+                        (file-relative-name source pwd))
+                    source))
+         (log-buf (and log-buf (get-buffer-create log-buf)))
+         (time (file-attribute-modification-time (file-attributes output))))
+    (save-window-excursion
+      (dolist (command commands)
+        (cond
+         ((functionp command)
+          (funcall command (shell-quote-argument relname)))
+         ((stringp command)
+          (let ((shell-command-dont-erase-buffer t))
+            (shell-command command log-buf))))))
+    ;; Check for process failure.  Output file is expected to be
+    ;; located in the same directory as SOURCE.
+    (unless (org-file-newer-than-p output time)
+      (ignore (defvar org-batch-test))
+      ;; Display logs when running tests.
+      (when (bound-and-true-p org-batch-test)
+        (message "org-compile-file log ::\n-----\n%s\n-----\n"
+                 (with-current-buffer log-buf (buffer-string))))
+      (error
+       (format
+        "File %S wasn't produced%s"
+        output
+        (if (org-string-nw-p err-msg)
+            (concat "  " (org-trim err-msg))
+          err-msg))))
+    output))
+
+(defun org-compile-file-commands (source process ext &optional spec err-msg)
+  "Return list of commands used to compile SOURCE file.
+
+The commands are formed from PROCESS, which is either a function or
+a list of shell commands, as strings.  EXT is a file extension, without
+the leading dot, as a string.  After PROCESS has been executed,
+a file with the same basename and directory as SOURCE but with the
+file extension EXT is expected to be produced.
+Failure to produce this file will be interpreted as PROCESS failing.
+
+If PROCESS is a function, it is called with a single argument:
+the SOURCE file.
+
+If PROCESS is a list of commands, each of them is called using
+`shell-command'.  By default, in each command, %b, %f, %F, %o and
+%O are replaced with, respectively, SOURCE base name, relative
+file name, absolute file name, relative directory and absolute
+output file name.  It is possible, however, to use more
+place-holders by specifying them in optional argument SPEC, as an
+alist following the pattern
+
+  (CHARACTER . REPLACEMENT-STRING).
+
+Throw an error if PROCESS does not satisfy the described patterns.
+The error string will be appended with ERR-MSG, when it is a string."
+  (let* ((basename (file-name-base source))
+         ;; Resolve symlinks in default-directory to correctly handle
+         ;; absolute source paths or relative paths with ..
+         (pwd (file-truename default-directory))
+         (absname (expand-file-name source pwd))
+         (relname (if (file-name-absolute-p source)
+                        (file-relative-name source pwd)
+                      source))
+	 (relpath (or (file-name-directory relname) "./"))
+	 (output (concat (file-name-sans-extension absname) "." ext))
+	 (err-msg (if (stringp err-msg) (concat ".  " err-msg) "")))
+    (pcase process
+      ((pred functionp) (list process))
+      ((pred consp)
+       (let ((spec (append spec
+			   `((?b . ,(shell-quote-argument basename))
+			     (?f . ,(shell-quote-argument relname))
+			     (?F . ,(shell-quote-argument absname))
+			     (?o . ,(shell-quote-argument relpath))
+			     (?O . ,(shell-quote-argument output))))))
+         (mapcar (lambda (command) (format-spec command spec)) process)))
+      (_ (error "No valid command to process %S%s" source err-msg)))))
+
+(defun org-display-buffer-split (buffer alist)
+  "Display BUFFER in the current frame split in two parts.
+The frame will display two buffers - current buffer and BUFFER.
+ALIST is an association list of action symbols and values.  See
+Info node `(elisp) Buffer Display Action Alists' for details of
+such alists.
+
+Use `display-buffer-in-direction' internally.
+
+This is an action function for buffer display, see Info
+node `(elisp) Buffer Display Action Functions'.  It should be
+called only by `display-buffer' or a function directly or
+indirectly called by the latter."
+  (let ((window-configuration (current-window-configuration)))
+    (ignore-errors (delete-other-windows))
+    (or (display-buffer-in-direction buffer alist)
+        (display-buffer-pop-up-window buffer alist)
+        (prog1 nil
+          (set-window-configuration window-configuration)))))
+
+(defun org-display-buffer-in-window (buffer alist)
+  "Display BUFFER in specific window.
+The window is defined according to the `window' slot in the ALIST.
+Then `same-frame' slot in the ALIST is set, only display buffer when
+window is present in the current frame.
+
+This is an action function for buffer display, see Info
+node `(elisp) Buffer Display Action Functions'.  It should be
+called only by `display-buffer' or a function directly or
+indirectly called by the latter."
+  (let ((window (alist-get 'window alist)))
+    (when (and window
+               (window-live-p window)
+               (or (not (alist-get 'same-frame alist))
+                   (eq (window-frame) (window-frame window))))
+      (window--display-buffer buffer window 'reuse alist))))
 
 (provide 'org-macs)
 

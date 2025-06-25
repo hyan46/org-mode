@@ -1,9 +1,9 @@
 ;;; org-inlinetask.el --- Tasks Independent of Outline Hierarchy -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2009-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2025 Free Software Foundation, Inc.
 ;;
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 
 ;; This file is part of GNU Emacs.
@@ -78,6 +78,9 @@
 
 ;;; Code:
 
+(require 'org-macs)
+(org-assert-version)
+
 (require 'org)
 
 (defgroup org-inlinetask nil
@@ -91,9 +94,8 @@ Don't set it to something higher than `29' or clocking will break since this
 is the hardcoded maximum number of stars `org-clock-sum' will work with.
 
 It is strongly recommended that you set `org-cycle-max-level' not at all,
-or to a number smaller than this one.  In fact, when `org-cycle-max-level' is
-not set, it will be assumed to be one less than the value of smaller than
-the value of this variable."
+or to a number smaller than this one.  See `org-cycle-max-level'
+docstring for more details."
   :group 'org-inlinetask
   :type '(choice
 	  (const :tag "Off" nil)
@@ -170,9 +172,9 @@ The number of levels is controlled by `org-inlinetask-min-level'."
        (not (org-inlinetask-end-p))))
 
 (defun org-inlinetask-in-task-p ()
-  "Return true if point is inside an inline task."
+  "Return non-nil if point is inside an inline task."
   (save-excursion
-    (beginning-of-line)
+    (forward-line 0)
     (let ((case-fold-search t))
       (or (looking-at-p (concat (org-inlinetask-outline-regexp) "\\(?:.*\\)"))
 	  (and (re-search-forward "^\\*+[ \t]+" nil t)
@@ -191,7 +193,7 @@ The number of levels is controlled by `org-inlinetask-min-level'."
   "Go to the end of the inline task at point.
 Return point."
   (save-match-data
-    (beginning-of-line)
+    (forward-line 0)
     (let ((case-fold-search t)
 	  (inlinetask-re (org-inlinetask-outline-regexp)))
       (cond
@@ -238,8 +240,8 @@ going below `org-inlinetask-min-level'."
 	  (setq beg (point))
 	  (replace-match down-task nil t nil 1)
 	  (org-inlinetask-goto-end)
-	  (if (and (eobp) (looking-back "END\\s-*" (point-at-bol)))
-              (beginning-of-line)
+          (if (and (eobp) (looking-back "END\\s-*" (line-beginning-position)))
+              (forward-line 0)
             (forward-line -1))
 	  (unless (= (point) beg)
             (looking-at (org-inlinetask-outline-regexp))
@@ -264,8 +266,8 @@ If the task has an end part, also demote it."
 	(setq beg (point))
 	(replace-match down-task nil t nil 1)
 	(org-inlinetask-goto-end)
-        (if (and (eobp) (looking-back "END\\s-*" (point-at-bol)))
-            (beginning-of-line)
+        (if (and (eobp) (looking-back "END\\s-*" (line-beginning-position)))
+            (forward-line 0)
           (forward-line -1))
 	(unless (= (point) beg)
           (looking-at (org-inlinetask-outline-regexp))
@@ -314,7 +316,7 @@ When STATE is `unfold', unfold unconditionally."
 	       (if (bolp) (1- (point)) (point))))
 	(start (save-excursion
 		 (org-inlinetask-goto-beginning)
-		 (point-at-eol))))
+                 (line-end-position))))
     (cond
      ;; Nothing to show/hide.
      ((= end start))

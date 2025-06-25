@@ -1,10 +1,10 @@
 ;;; org-pcomplete.el --- In-buffer Completion Code -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2004-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2004-2025 Free Software Foundation, Inc.
 ;;
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
 ;;         John Wiegley <johnw at gnu dot org>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 ;;
 ;; This file is part of GNU Emacs.
@@ -22,9 +22,16 @@
 ;; You should have received a copy of the GNU General Public License
 ;; along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 
+;;; Commentary:
+
+;; This library implements completion support in Org mode buffers.
+
 ;;; Code:
 
 ;;;; Require other packages
+
+(require 'org-macs)
+(org-assert-version)
 
 (require 'org-macs)
 (require 'org-compat)
@@ -32,12 +39,13 @@
 
 (declare-function org-at-heading-p "org" (&optional ignored))
 (declare-function org-babel-combine-header-arg-lists "ob-core" (original &rest others))
-(declare-function org-babel-get-src-block-info "ob-core" (&optional light datum))
+(declare-function org-babel-get-src-block-info "ob-core" (&optional no-eval datum))
 (declare-function org-before-first-heading-p "org" ())
 (declare-function org-buffer-property-keys "org" (&optional specials defaults columns))
 (declare-function org-element-at-point "org-element" (&optional pom cached-only))
-(declare-function org-element-property "org-element" property element)
-(declare-function org-element-type "org-element" (element))
+(declare-function org-element-property "org-element-ast" (property node &optional dflt force-undefer))
+(declare-function org-element-end "org-element" (node))
+(declare-function org-element-type-p "org-element-ast" (node types))
 (declare-function org-end-of-meta-data "org" (&optional full))
 (declare-function org-entry-properties "org" (&optional pom which))
 (declare-function org-export-backend-options "ox" (cl-x) t)
@@ -47,6 +55,7 @@
 (declare-function org-get-tags "org" (&optional pos local))
 (declare-function org-link-heading-search-string "ol" (&optional string))
 (declare-function org-tag-alist-to-string "org" (alist &optional skip-key))
+(declare-function org-time-stamp-format "org" (&optional with-time inactive custom))
 
 (defvar org-babel-common-header-args-w-values)
 (defvar org-current-tag-alist)
@@ -67,7 +76,6 @@
 (defvar org-property-re)
 (defvar org-startup-options)
 (defvar org-tag-re)
-(defvar org-time-stamp-formats)
 (defvar org-todo-keywords-1)
 (defvar org-todo-line-regexp)
 
@@ -168,21 +176,29 @@ When completing for #+STARTUP, for example, this function returns
 
 (defun org-parse-arguments ()
   "Parse whitespace separated arguments in the current region."
-  (let ((begin (line-beginning-position))
-	(end (line-end-position))
-	begins args)
-    (save-restriction
-      (narrow-to-region begin end)
+  (if (equal (cons "searchhead" nil) (org-thing-at-point))
+      ;; [[* foo<point> bar link::search option.
+      ;; Arguments are not simply space-separated.
       (save-excursion
-	(goto-char (point-min))
-	(while (not (eobp))
-	  (skip-chars-forward " \t\n[")
-	  (setq begins (cons (point) begins))
-	  (skip-chars-forward "^ \t\n[")
-	  (setq args (cons (buffer-substring-no-properties
-			    (car begins) (point))
-			   args)))
-	(cons (reverse args) (reverse begins))))))
+        (let ((origin (point)))
+          (skip-chars-backward "^*" (line-beginning-position))
+          (cons (list (buffer-substring-no-properties (point) origin))
+                (list (point)))))
+    (let ((begin (line-beginning-position))
+	  (end (line-end-position))
+	  begins args)
+      (save-restriction
+        (narrow-to-region begin end)
+        (save-excursion
+	  (goto-char (point-min))
+	  (while (not (eobp))
+	    (skip-chars-forward " \t\n[")
+	    (setq begins (cons (point) begins))
+	    (skip-chars-forward "^ \t\n[")
+	    (setq args (cons (buffer-substring-no-properties
+			      (car begins) (point))
+			     args)))
+	  (cons (reverse args) (reverse begins)))))))
 
 (defun org-pcomplete-initial ()
   "Call the right completion function for first argument completions."
@@ -227,7 +243,7 @@ When completing for #+STARTUP, for example, this function returns
 
 (defun pcomplete/org-mode/file-option/date ()
   "Complete arguments for the #+DATE file option."
-  (pcomplete-here (list (format-time-string (car org-time-stamp-formats)))))
+  (pcomplete-here (list (format-time-string (org-time-stamp-format)))))
 
 (defun pcomplete/org-mode/file-option/email ()
   "Complete arguments for the #+EMAIL file option."
@@ -303,7 +319,7 @@ When completing for #+STARTUP, for example, this function returns
 	      "creator:" "date:" "d:" "email:" "*:" "e:" "::" "f:"
 	      "inline:" "tex:" "p:" "pri:" "':" "-:" "stat:" "^:" "toc:"
 	      "|:" "tags:" "tasks:" "<:" "todo:")
-	    ;; OPTION items from registered back-ends.
+	    ;; OPTION items from registered backends.
 	    (let (items)
 	      (dolist (backend (bound-and-true-p
 				org-export-registered-backends))
@@ -358,10 +374,7 @@ This needs more work, to handle headings with lots of spaces in them."
 		;; Remove the leading asterisk from
 		;; `org-link-heading-search-string' result.
 		(push (substring (org-link-heading-search-string) 1) tbl))
-	      (pcomplete-uniquify-list tbl)))
-	  ;; When completing a bracketed link, i.e., "[[*", argument
-	  ;; starts at the star, so remove this character.
-	  (substring pcomplete-stub 1))))
+	      (pcomplete-uniquify-list tbl))))))
 
 (defun pcomplete/org-mode/tag ()
   "Complete a tag name.  Omit tags already set."
@@ -390,10 +403,9 @@ This needs more work, to handle headings with lots of spaces in them."
 		(goto-char (point-min))
 		(while (re-search-forward org-drawer-regexp nil t)
 		  (let ((drawer (org-element-at-point)))
-		    (when (memq (org-element-type drawer)
-				'(drawer property-drawer))
+		    (when (org-element-type-p drawer '(drawer property-drawer))
 		      (push (org-element-property :drawer-name drawer) names)
-		      (goto-char (org-element-property :end drawer))))))
+		      (goto-char (org-element-end drawer))))))
 	      (pcomplete-uniquify-list names))))
    (substring pcomplete-stub 1)))	;remove initial colon
 
@@ -421,7 +433,7 @@ switches."
 				    (symbol-plist
 				     'org-babel-load-languages)
 				    'custom-type)))))))
-  (let* ((info (org-babel-get-src-block-info 'light))
+  (let* ((info (org-babel-get-src-block-info 'no-eval))
 	 (lang (car info))
 	 (lang-headers (intern (concat "org-babel-header-args:" lang)))
 	 (headers (org-babel-combine-header-arg-lists

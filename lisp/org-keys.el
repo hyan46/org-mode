@@ -1,8 +1,9 @@
 ;;; org-keys.el --- Key bindings for Org mode        -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2018-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2018-2025 Free Software Foundation, Inc.
 
 ;; Author: Nicolas Goaziou <mail@nicolasgoaziou.fr>
+;; Maintainer: Ihor Radchenko <yantar92 at posteo dot net>
 
 ;; This file is part of GNU Emacs.
 
@@ -26,6 +27,9 @@
 ;; details.
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
 
 (require 'cl-lib)
 
@@ -82,11 +86,25 @@
 (declare-function org-down-element "org" ())
 (declare-function org-edit-special "org" (&optional arg))
 (declare-function org-element-at-point "org-element" (&optional pom cached-only))
-(declare-function org-element-type "org-element" (element))
+(declare-function org-element-type-p "org-element-ast" (node types))
 (declare-function org-emphasize "org" (&optional char))
 (declare-function org-end-of-line "org" (&optional n))
 (declare-function org-entry-put "org" (pom property value))
-(declare-function org-eval-in-calendar "org" (form &optional keepdate))
+(declare-function org-calendar-goto-today-or-insert-dot "org" ())
+(declare-function org-calendar-goto-today "org" ())
+(declare-function org-calendar-backward-month "org" ())
+(declare-function org-calendar-forward-month "org" ())
+(declare-function org-calendar-backward-year "org" ())
+(declare-function org-calendar-forward-year "org" ())
+(declare-function org-calendar-backward-week "org" ())
+(declare-function org-calendar-forward-week "org" ())
+(declare-function org-calendar-backward-day "org" ())
+(declare-function org-calendar-forward-day "org" ())
+(declare-function org-calendar-view-entries "org" ())
+(declare-function org-calendar-scroll-month-left "org" ())
+(declare-function org-calendar-scroll-month-right "org" ())
+(declare-function org-calendar-scroll-three-months-left "org" ())
+(declare-function org-calendar-scroll-three-months-right "org" ())
 (declare-function org-evaluate-time-range "org" (&optional to-buffer))
 (declare-function org-export-dispatch "org" (&optional arg))
 (declare-function org-feed-goto-inbox "org" (feed))
@@ -187,8 +205,8 @@
 (declare-function org-table-sum "org" (&optional beg end nlast))
 (declare-function org-table-toggle-coordinate-overlays "org" ())
 (declare-function org-table-toggle-formula-debugger "org" ())
-(declare-function org-time-stamp "org" (arg &optional inactive))
-(declare-function org-time-stamp-inactive "org" (&optional arg))
+(declare-function org-timestamp "org" (arg &optional inactive))
+(declare-function org-timestamp-inactive "org" (&optional arg))
 (declare-function org-timer "org" (&optional restart no-insert))
 (declare-function org-timer-item "org" (&optional arg))
 (declare-function org-timer-pause-or-continue "org" (&optional stop))
@@ -201,13 +219,14 @@
 (declare-function org-toggle-radio-button "org" (&optional arg))
 (declare-function org-toggle-comment "org" ())
 (declare-function org-toggle-fixed-width "org" ())
-(declare-function org-toggle-inline-images "org" (&optional include-linked))
+(declare-function org-link-preview "ol" (&optional arg beg end))
+(declare-function org-link-preview-refresh "ol" ())
 (declare-function org-latex-preview "org" (&optional arg))
 (declare-function org-toggle-narrow-to-subtree "org" ())
 (declare-function org-toggle-ordered-property "org" ())
 (declare-function org-toggle-pretty-entities "org" ())
 (declare-function org-toggle-tags-groups "org" ())
-(declare-function org-toggle-time-stamp-overlays "org" ())
+(declare-function org-toggle-timestamp-overlays "org" ())
 (declare-function org-transpose-element "org" ())
 (declare-function org-transpose-words "org" ())
 (declare-function org-tree-to-indirect-buffer "org" (&optional arg))
@@ -215,6 +234,7 @@
 (declare-function org-update-statistics-cookies "org" (all))
 (declare-function org-yank "org" (&optional arg))
 (declare-function orgtbl-ascii-plot "org-table" (&optional ask))
+(declare-function outline-up-heading "outline" (arg &optional invisible-ok))
 
 
 
@@ -270,7 +290,7 @@ therefore you'll have to restart Emacs to apply it after changing."
 
 (defcustom org-mouse-1-follows-link
   (if (boundp 'mouse-1-click-follows-link) mouse-1-click-follows-link t)
-  "Non-nil means mouse-1 on a link will follow the link.
+  "Non-nil means Mouse-1 on a link will follow the link.
 A longer mouse click will still set point.  Needs to be set
 before org.el is loaded."
   :group 'org-link-follow
@@ -295,7 +315,7 @@ implementation is bad."
   :type 'hook)
 
 (defcustom org-return-follows-link nil
-  "Non-nil means on links RET will follow the link.
+  "Non-nil means on links RET will open links, timestamps, and citations.
 In tables, the special behavior of RET has precedence."
   :group 'org-link-follow
   :type 'boolean
@@ -306,7 +326,7 @@ In tables, the special behavior of RET has precedence."
 
 ;;;; Base functions
 (defun org-key (key)
-  "Select key according to `org-replace-disputed-keys' and `org-disputed-keys'.
+  "Select KEY according to `org-replace-disputed-keys' and `org-disputed-keys'.
 Or return the original if not disputed."
   (when org-replace-disputed-keys
     (let* ((nkey (key-description key))
@@ -316,7 +336,7 @@ Or return the original if not disputed."
   key)
 
 (defun org-defkey (keymap key def)
-  "Define a key, possibly translated, as returned by `org-key'."
+  "Define KEY, possibly translated, as returned by `org-key' in KEYMAP to DEF."
   (define-key keymap (org-key key) def))
 
 (defun org-remap (map &rest commands)
@@ -346,71 +366,25 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 (defvar org-read-date-minibuffer-local-map
   (let* ((map (make-sparse-keymap)))
     (set-keymap-parent map minibuffer-local-map)
-    (org-defkey map (kbd ".")
-                (lambda () (interactive)
-		  ;; Are we at the beginning of the prompt?
-		  (if (looking-back "^[^:]+: "
-				    (let ((inhibit-field-text-motion t))
-				      (line-beginning-position)))
-		      (org-eval-in-calendar '(calendar-goto-today))
-		    (insert "."))))
-    (org-defkey map (kbd "C-.")
-                (lambda () (interactive)
-		  (org-eval-in-calendar '(calendar-goto-today))))
-    (org-defkey map (kbd "M-S-<left>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-backward-month 1))))
-    (org-defkey map (kbd "ESC S-<left>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-backward-month 1))))
-    (org-defkey map (kbd "M-S-<right>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-forward-month 1))))
-    (org-defkey map (kbd "ESC S-<right>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-forward-month 1))))
-    (org-defkey map (kbd "M-S-<up>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-backward-year 1))))
-    (org-defkey map (kbd "ESC S-<up>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-backward-year 1))))
-    (org-defkey map (kbd "M-S-<down>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-forward-year 1))))
-    (org-defkey map (kbd "ESC S-<down>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-forward-year 1))))
-    (org-defkey map (kbd "S-<up>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-backward-week 1))))
-    (org-defkey map (kbd "S-<down>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-forward-week 1))))
-    (org-defkey map (kbd "S-<left>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-backward-day 1))))
-    (org-defkey map (kbd "S-<right>")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-forward-day 1))))
-    (org-defkey map (kbd "!")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(diary-view-entries))
-                  (message "")))
-    (org-defkey map (kbd ">")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-scroll-left 1))))
-    (org-defkey map (kbd "<")
-                (lambda () (interactive)
-                  (org-eval-in-calendar '(calendar-scroll-right 1))))
-    (org-defkey map (kbd "C-v")
-                (lambda () (interactive)
-                  (org-eval-in-calendar
-                   '(calendar-scroll-left-three-months 1))))
-    (org-defkey map (kbd "M-v")
-                (lambda () (interactive)
-                  (org-eval-in-calendar
-                   '(calendar-scroll-right-three-months 1))))
+    (org-defkey map (kbd ".") #'org-calendar-goto-today-or-insert-dot)
+    (org-defkey map (kbd "C-.") #'org-calendar-goto-today)
+    (org-defkey map (kbd "M-S-<left>") #'org-calendar-backward-month)
+    (org-defkey map (kbd "ESC S-<left>") #'org-calendar-backward-month)
+    (org-defkey map (kbd "M-S-<right>") #'org-calendar-forward-month)
+    (org-defkey map (kbd "ESC S-<right>") #'org-calendar-forward-month)
+    (org-defkey map (kbd "M-S-<up>") #'org-calendar-backward-year)
+    (org-defkey map (kbd "ESC S-<up>") #'org-calendar-backward-year)
+    (org-defkey map (kbd "M-S-<down>") #'org-calendar-forward-year)
+    (org-defkey map (kbd "ESC S-<down>") #'org-calendar-forward-year)
+    (org-defkey map (kbd "S-<up>") #'org-calendar-backward-week)
+    (org-defkey map (kbd "S-<down>") #'org-calendar-forward-week)
+    (org-defkey map (kbd "S-<left>") #'org-calendar-backward-day)
+    (org-defkey map (kbd "S-<right>") #'org-calendar-forward-day)
+    (org-defkey map (kbd "!") #'org-calendar-view-entries)
+    (org-defkey map (kbd ">") #'org-calendar-scroll-month-left)
+    (org-defkey map (kbd "<") #'org-calendar-scroll-month-right)
+    (org-defkey map (kbd "C-v") #'org-calendar-scroll-three-months-left)
+    (org-defkey map (kbd "M-v") #'org-calendar-scroll-three-months-right)
     map)
   "Keymap for minibuffer commands when using `org-read-date'.")
 
@@ -418,9 +392,9 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 ;;; Global bindings
 
 ;;;; Outline functions
-(define-key org-mode-map [menu-bar headings] 'undefined)
-(define-key org-mode-map [menu-bar hide] 'undefined)
-(define-key org-mode-map [menu-bar show] 'undefined)
+(define-key org-mode-map [menu-bar headings] #'undefined)
+(define-key org-mode-map [menu-bar hide] #'undefined)
+(define-key org-mode-map [menu-bar show] #'undefined)
 
 (define-key org-mode-map [remap outline-mark-subtree] #'org-mark-subtree)
 (define-key org-mode-map [remap outline-show-subtree] #'org-fold-show-subtree)
@@ -438,6 +412,8 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 (define-key org-mode-map [remap outline-previous-visible-heading]
   #'org-previous-visible-heading)
 (define-key org-mode-map [remap outline-show-children] #'org-fold-show-children)
+(defalias 'org-up-heading #'outline-up-heading)
+(define-key org-mode-map [remap outline-up-heading] #'org-up-heading)
 
 ;;;; Make `C-c C-x' a prefix key
 (org-defkey org-mode-map (kbd "C-c C-x") (make-sparse-keymap))
@@ -491,6 +467,37 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 (org-defkey org-mode-map (kbd "C-S-<up>") #'org-shiftcontrolup)
 (org-defkey org-mode-map (kbd "C-S-<down>") #'org-shiftcontroldown)
 
+;;; Repeat-mode map.
+(defvar org-navigation-repeat-map (make-sparse-keymap)
+  "Repeat keymap for navigation commands.")
+(org-defkey org-navigation-repeat-map (kbd "b") #'org-backward-heading-same-level)
+(org-defkey org-navigation-repeat-map (kbd "f") #'org-forward-heading-same-level)
+(org-defkey org-navigation-repeat-map (kbd "n") #'org-next-visible-heading)
+(org-defkey org-navigation-repeat-map (kbd "p") #'org-previous-visible-heading)
+(org-defkey org-navigation-repeat-map (kbd "u") #'org-up-heading)
+(map-keymap
+ (lambda (_key cmd)
+   (put cmd 'repeat-map 'org-navigation-repeat-map))
+ org-navigation-repeat-map)
+
+(defvar org-link-navigation-repeat-map (make-sparse-keymap)
+  "Repeat keymap for link navigation commands.")
+(org-defkey org-link-navigation-repeat-map (kbd "n") #'org-next-link)
+(org-defkey org-link-navigation-repeat-map (kbd "p") #'org-previous-link)
+(map-keymap
+ (lambda (_ cmd)
+   (put cmd 'repeat-map 'org-link-navigation-repeat-map))
+ org-link-navigation-repeat-map)
+
+(defvar org-block-navigation-repeat-map (make-sparse-keymap)
+  "Repeat keymap for block navigation commands.")
+(org-defkey org-block-navigation-repeat-map (kbd "f") #'org-next-block)
+(org-defkey org-block-navigation-repeat-map (kbd "b") #'org-previous-block)
+(map-keymap
+ (lambda (_ cmd)
+   (put cmd 'repeat-map 'org-block-navigation-repeat-map))
+ org-block-navigation-repeat-map)
+
 ;;;; Extra keys for TTY access.
 
 ;;  We only set them when really needed because otherwise the
@@ -500,6 +507,7 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
   (org-defkey org-mode-map (kbd "C-c C-x c") #'org-table-copy-down)
   (org-defkey org-mode-map (kbd "C-c C-x m") #'org-meta-return)
   (org-defkey org-mode-map (kbd "C-c C-x M") #'org-insert-todo-heading)
+  (org-defkey org-mode-map (kbd "C-c C-x s") #'org-insert-structure-template)
   (org-defkey org-mode-map (kbd "C-c C-x RET") #'org-meta-return)
   (org-defkey org-mode-map (kbd "ESC RET") #'org-meta-return)
   (org-defkey org-mode-map (kbd "ESC <left>") #'org-metaleft)
@@ -590,8 +598,8 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 (org-defkey org-mode-map (kbd "C-c %") #'org-mark-ring-push)
 (org-defkey org-mode-map (kbd "C-c &") #'org-mark-ring-goto)
 (org-defkey org-mode-map (kbd "C-c C-z") #'org-add-note) ;alternative binding
-(org-defkey org-mode-map (kbd "C-c .") #'org-time-stamp) ;minor-mode reserved
-(org-defkey org-mode-map (kbd "C-c !") #'org-time-stamp-inactive) ;minor-mode r.
+(org-defkey org-mode-map (kbd "C-c .") #'org-timestamp) ;minor-mode reserved
+(org-defkey org-mode-map (kbd "C-c !") #'org-timestamp-inactive) ;minor-mode r.
 (org-defkey org-mode-map (kbd "C-c ,") #'org-priority) ;minor-mode reserved
 (org-defkey org-mode-map (kbd "C-c C-y") #'org-evaluate-time-range)
 (org-defkey org-mode-map (kbd "C-c >") #'org-goto-calendar)
@@ -635,7 +643,7 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 (org-defkey org-mode-map (kbd "C-c C-x C-w") #'org-cut-special)
 (org-defkey org-mode-map (kbd "C-c C-x M-w") #'org-copy-special)
 (org-defkey org-mode-map (kbd "C-c C-x C-y") #'org-paste-special)
-(org-defkey org-mode-map (kbd "C-c C-x C-t") #'org-toggle-time-stamp-overlays)
+(org-defkey org-mode-map (kbd "C-c C-x C-t") #'org-toggle-timestamp-overlays)
 (org-defkey org-mode-map (kbd "C-c C-x C-i") #'org-clock-in)
 (org-defkey org-mode-map (kbd "C-c C-x C-x") #'org-clock-in-last)
 (org-defkey org-mode-map (kbd "C-c C-x C-z") #'org-resolve-clocks)
@@ -646,8 +654,8 @@ COMMANDS is a list of alternating OLDDEF NEWDEF command names."
 (org-defkey org-mode-map (kbd "C-c C-x x") #'org-dynamic-block-insert-dblock)
 (org-defkey org-mode-map (kbd "C-c C-x C-u") #'org-dblock-update)
 (org-defkey org-mode-map (kbd "C-c C-x C-l") #'org-latex-preview)
-(org-defkey org-mode-map (kbd "C-c C-x C-v") #'org-toggle-inline-images)
-(org-defkey org-mode-map (kbd "C-c C-x C-M-v") #'org-redisplay-inline-images)
+(org-defkey org-mode-map (kbd "C-c C-x C-v") #'org-link-preview)
+(org-defkey org-mode-map (kbd "C-c C-x C-M-v") #'org-link-preview-refresh)
 (org-defkey org-mode-map (kbd "C-c C-x \\") #'org-toggle-pretty-entities)
 (org-defkey org-mode-map (kbd "C-c C-x C-b") #'org-toggle-checkbox)
 (org-defkey org-mode-map (kbd "C-c C-x C-r") #'org-toggle-radio-button)
@@ -785,19 +793,21 @@ command."
 				(function)
 				(sexp))))))
 
-(defun org-print-speed-command (e)
-  (if (> (length (car e)) 1)
+(defun org--print-speed-command (speed-command)
+  "Print information about SPEED-COMMAND in help buffer.
+SPEED-COMMAND is an element of `org-speed-commands'."
+  (if (> (length (car speed-command)) 1)
       (progn
 	(princ "\n")
-	(princ (car e))
+	(princ (car speed-command))
 	(princ "\n")
-	(princ (make-string (length (car e)) ?-))
+	(princ (make-string (length (car speed-command)) ?-))
 	(princ "\n"))
-    (princ (car e))
+    (princ (car speed-command))
     (princ "   ")
-    (if (symbolp (cdr e))
-	(princ (symbol-name (cdr e)))
-      (prin1 (cdr e)))
+    (if (symbolp (cdr speed-command))
+	(princ (symbol-name (cdr speed-command)))
+      (prin1 (cdr speed-command)))
     (princ "\n")))
 
 (defun org-speed-command-help ()
@@ -805,18 +815,9 @@ command."
   (interactive)
   (unless org-use-speed-commands
     (user-error "Speed commands are not activated, customize `org-use-speed-commands'"))
-  ;; FIXME: remove this warning for 9.6
-  (when (boundp 'org-speed-commands-user)
-    (message "`org-speed-command-user' is obsolete, please use `org-speed-commands'")
-    (sit-for 3))
   (with-output-to-temp-buffer "*Help*"
     (princ "Speed commands\n==============\n")
-    (mapc #'org-print-speed-command
-          ;; FIXME: don't check `org-speed-commands-user' past 9.6
-          (if (boundp 'org-speed-commands-user)
-              (append org-speed-commands
-                      org-speed-commands-user)
-            org-speed-commands)))
+    (mapc #'org--print-speed-command org-speed-commands))
   (with-current-buffer "*Help*"
     (setq truncate-lines t)))
 
@@ -832,16 +833,12 @@ If not, return to the original position and throw an error."
 
 (defun org-speed-command-activate (keys)
   "Hook for activating single-letter speed commands.
+KEYS is the keys vector as returned by `this-command-keys-vector'.
 See `org-speed-commands' for configuring them."
   (when (or (and (bolp) (looking-at org-outline-regexp))
 	    (and (functionp org-use-speed-commands)
 		 (funcall org-use-speed-commands)))
-    (cdr (assoc keys
-                ;; FIXME: don't check `org-speed-commands-user' past 9.6
-                (if (boundp 'org-speed-commands-user)
-                    (append org-speed-commands
-                            org-speed-commands-user)
-                  org-speed-commands)))))
+    (cdr (assoc keys org-speed-commands))))
 
 
 ;;; Babel speed keys
@@ -911,10 +908,11 @@ a-list placed behind the generic `org-babel-key-prefix'.")
   (define-key org-babel-map key def))
 
 (defun org-babel-speed-command-activate (keys)
-  "Hook for activating single-letter code block commands."
+  "Hook for activating single-letter code block commands.
+KEYS is the keys vector as returned by `this-command-keys-vector'."
   (when (and (bolp)
 	     (let ((case-fold-search t)) (looking-at "[ \t]*#\\+begin_src"))
-	     (eq 'src-block (org-element-type (org-element-at-point))))
+	     (org-element-type-p (org-element-at-point) 'src-block))
     (cdr (assoc keys org-babel-key-bindings))))
 
 ;;;###autoload

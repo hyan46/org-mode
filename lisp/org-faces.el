@@ -1,9 +1,10 @@
 ;;; org-faces.el --- Face definitions -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2004-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2004-2025 Free Software Foundation, Inc.
 
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Maintainer: Ihor Radchenko <yantar92 at posteo dot net>
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 ;;
 ;; This file is part of GNU Emacs.
@@ -27,6 +28,9 @@
 ;; This file contains the face definitions for Org.
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
 
 (defgroup org-faces nil
   "Faces in Org mode."
@@ -105,7 +109,7 @@ color of the frame."
   "Face used for drawers."
   :group 'org-faces)
 
-(defface org-property-value nil
+(defface org-property-value '((t :inherit default))
   "Face used for the value of a property."
   :group 'org-faces)
 
@@ -137,7 +141,7 @@ The following faces apply, with this priority.
 
 Since column view works by putting overlays with a display property
 over individual characters in the buffer, the face of the underlining
-character (this might for example be the a TODO keyword) might still
+character (this might for example be the TODO keyword) might still
 shine through in some properties.  So when your column view looks
 funny, with \"random\" colors, weight, strike-through, try to explicitly
 set the properties in the `org-column' face.  For example, set
@@ -386,6 +390,10 @@ changes."
   "Face used for tables."
   :group 'org-faces)
 
+(defface org-table-row '((t :inherit org-table))
+  "Face used to fontify whole table rows (including newlines and indentation)."
+  :group 'org-faces)
+
 (defface org-table-header '((t :inherit org-table
 			       :background "LightGray"
 			       :foreground "Black"))
@@ -514,7 +522,7 @@ content of these blocks will still be treated as Org syntax."
 (defface org-agenda-structure-filter '((t (:inherit (org-warning org-agenda-structure))))
   "Face used for the current type of task filter in the agenda.
 It inherits from `org-agenda-structure' so it can adapt to
-it (e.g. if that is assigned a diffent font height or family)."
+it (e.g. if that is assigned a different font height or family)."
   :group 'org-faces)
 
 (defface org-agenda-date '((t (:inherit org-agenda-structure)))
@@ -657,6 +665,10 @@ month and 365.24 days for a year)."
   "Face used for agenda entries that come from the Emacs diary."
   :group 'org-faces)
 
+(defface org-agenda-calendar-daterange '((t :inherit default))
+  "Face used to show entries with a date range in the agenda."
+  :group 'org-faces)
+
 (defface org-agenda-calendar-event '((t :inherit default))
   "Face used to show events and appointments in the agenda."
   :group 'org-faces)
@@ -672,15 +684,15 @@ month and 365.24 days for a year)."
 (defcustom org-n-level-faces (length org-level-faces)
   "The number of different faces to be used for headlines.
 Org mode defines 8 different headline faces, so this can be at most 8.
-If it is less than 8, the level-1 face gets re-used for level N+1 etc."
+If it is less than 8, the level-1 face gets reused for level N+1 etc."
   :type 'integer
   :group 'org-faces)
 
 (defcustom org-cycle-level-faces t
   "Non-nil means level styles cycle after level `org-n-level-faces'.
 Then so level org-n-level-faces+1 is styled like level 1.
-If nil, then all levels >= org-n-level-faces are styled like
-level org-n-level-faces."
+If nil, then all levels >= `org-n-level-faces' are styled like
+level `org-n-level-faces'."
   :group 'org-appearance
   :group 'org-faces
   :version "24.1"

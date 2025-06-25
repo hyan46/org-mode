@@ -1,9 +1,9 @@
 ;;; org-feed.el --- Add RSS feed items to Org files  -*- lexical-binding: t; -*-
 ;;
-;; Copyright (C) 2009-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2025 Free Software Foundation, Inc.
 ;;
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 ;;
 ;; This file is part of GNU Emacs.
@@ -87,6 +87,9 @@
 ;;  similar mechanism using shell and awk scripts.
 
 ;;; Code:
+
+(require 'org-macs)
+(org-assert-version)
 
 (require 'org)
 (require 'sha1)
@@ -406,7 +409,7 @@ it can be a list structured like an entry in `org-feed-alist'."
 
 	  ;; Write the new status
 	  ;; We do this only now, in case something goes wrong above, so
-	  ;; that would would end up with a status that does not reflect
+          ;; that would end up with a status that does not reflect
 	  ;; which items truly have been handled
 	  (org-feed-write-status inbox-pos drawer status)
 
@@ -472,7 +475,7 @@ This will find DRAWER and extract the alist."
     (goto-char pos)
     (let ((end (save-excursion (org-end-of-subtree t t))))
       (if (re-search-forward
-	   (concat "^[ \t]*:" drawer ":[ \t]*\n\\([^\000]*?\\)\n[ \t]*:END:")
+	   (concat "^[ \t]*:" drawer ":[ \t]*\n\\(\\(?:.\\|\n\\)*?\\)\n[ \t]*:END:")
 	   end t)
 	  (read (match-string 1))
 	nil))))
@@ -492,7 +495,7 @@ This will find DRAWER and extract the alist."
 				  (match-beginning 0)))))
 	(outline-next-heading)
 	(insert "  :" drawer ":\n  :END:\n")
-	(beginning-of-line 0))
+	(forward-line -1))
       (insert (pp-to-string status)))))
 
 (defun org-feed-add-items (pos entries)
@@ -505,7 +508,7 @@ This will find DRAWER and extract the alist."
       (setq level (org-get-valid-level (length (match-string 1)) 1))
       (org-end-of-subtree t t)
       (skip-chars-backward " \t\n")
-      (beginning-of-line 2)
+      (forward-line 1)
       (setq pos (point))
       (while (setq entry (pop entries))
 	(org-paste-subtree level entry 'yank))
@@ -562,7 +565,7 @@ If that property is already present, nothing changes."
 			(let ((v (plist-get entry (intern (concat ":" name)))))
 			  (save-excursion
 			    (save-match-data
-			      (beginning-of-line)
+			      (forward-line 0)
 			      (if (looking-at
 				   (concat "^\\([ \t]*\\)%" name "[ \t]*$"))
 				  (org-feed-make-indented-block
@@ -630,7 +633,7 @@ containing the properties `:guid' and `:item-full-text'."
 	      end (and (re-search-forward "</item>" nil t)
 		       (match-beginning 0)))
 	(setq item (buffer-substring beg end)
-	      guid (if (string-match "<guid\\>.*?>\\([^\000]*?\\)</guid>" item)
+	      guid (if (string-match "<guid\\>.*?>\\(\\(?:.\\|\n\\)*?\\)</guid>" item)
 		       (xml-substitute-special (match-string-no-properties 1 item))))
 	(setq entry (list :guid guid :item-full-text item))
 	(push entry entries)
@@ -644,7 +647,7 @@ containing the properties `:guid' and `:item-full-text'."
   (with-temp-buffer
     (insert (plist-get entry :item-full-text))
     (goto-char (point-min))
-    (while (re-search-forward "<\\([a-zA-Z]+\\>\\).*?>\\([^\000]*?\\)</\\1>"
+    (while (re-search-forward "<\\([a-zA-Z]+\\>\\).*?>\\(\\(?:.\\|\n\\)*?\\)</\\1>"
 			      nil t)
       (setq entry (plist-put entry
 			     (intern (concat ":" (match-string 1)))

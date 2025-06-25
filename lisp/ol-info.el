@@ -1,9 +1,9 @@
 ;;; ol-info.el --- Links to Info Nodes               -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2004-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2004-2025 Free Software Foundation, Inc.
 
 ;; Author: Carsten Dominik <carsten.dominik@gmail.com>
-;; Keywords: outlines, hypermedia, calendar, wp
+;; Keywords: outlines, hypermedia, calendar, text
 ;; URL: https://orgmode.org
 ;;
 ;; This file is part of GNU Emacs.
@@ -30,7 +30,9 @@
 
 ;;; Code:
 
-(require 'subr-x) ; `string-trim', `string-remove-prefix'
+(require 'org-macs)
+(org-assert-version)
+
 (require 'ol)
 
 ;; Declare external functions and variables
@@ -48,7 +50,7 @@
                          :insert-description #'org-info-description-as-command)
 
 ;; Implementation
-(defun org-info-store-link ()
+(defun org-info-store-link (&optional _interactive?)
   "Store a link to an Info file and node."
   (when (eq major-mode 'Info-mode)
     (let ((link (concat "info:"
@@ -75,11 +77,11 @@ File may be a virtual one, see `Info-virtual-files'."
       '("dir" . "Top")
     (string-match "\\`\\([^#:]*\\)\\(?:[#:]:?\\(.*\\)\\)?\\'" path)
     (let* ((node (match-string 2 path))
-           ;; Do not reorder, `string-trim' modifies match.
-           (file (string-trim (match-string 1 path))))
+           ;; Do not reorder, `org-trim' modifies match.
+           (file (org-trim (match-string 1 path))))
       (cons
        (if (org-string-nw-p file) file "dir")
-       (if (org-string-nw-p node) (string-trim node) "Top")))))
+       (if (org-string-nw-p node) (org-trim node) "Top")))))
 
 (defun org-info-description-as-command (link desc)
   "Info link description that can be pasted as command.
@@ -103,7 +105,7 @@ If LINK is not an info link then DESC is returned."
          (need-file-node (and (not (org-string-nw-p desc))
                               (string-prefix-p prefix link))))
     (pcase (and need-file-node
-                (org-info--link-file-node (string-remove-prefix prefix link)))
+                (org-info--link-file-node (org-unbracket-string prefix "" link)))
       ;; Unlike (info "dir"), "info dir" shell command opens "(coreutils)dir invocation".
       (`("dir" . "Top") "info \"(dir)\"")
       (`(,file . "Top") (format "info %s" file))
@@ -127,23 +129,27 @@ If LINK is not an info link then DESC is returned."
 
 (defconst org-info-emacs-documents
   '("ada-mode" "auth" "autotype" "bovine" "calc" "ccmode" "cl" "dbus" "dired-x"
-    "ebrowse" "ede" "ediff" "edt" "efaq-w32" "efaq" "eieio" "eintr" "elisp"
-    "emacs-gnutls" "emacs-mime" "emacs" "epa" "erc" "ert" "eshell" "eudc" "eww"
-    "flymake" "forms" "gnus" "htmlfontify" "idlwave" "ido" "info" "mairix-el"
-    "message" "mh-e" "newsticker" "nxml-mode" "octave-mode" "org" "pcl-cvs"
-    "pgg" "rcirc" "reftex" "remember" "sasl" "sc" "semantic" "ses" "sieve"
-    "smtpmail" "speedbar" "srecode" "todo-mode" "tramp" "url" "vip" "viper"
-    "widget" "wisent" "woman")
+    "ebrowse" "ede" "ediff" "edt" "efaq-w32" "efaq" "eglot" "eieio" "eintr"
+    "elisp" "emacs-gnutls" "emacs-mime" "emacs" "epa" "erc" "ert" "eshell"
+    "eudc" "eww" "flymake" "forms" "gnus" "htmlfontify" "idlwave" "ido" "info"
+    "mairix-el" "message" "mh-e" "modus-themes" "newsticker" "nxml-mode" "octave-mode"
+    "org" "pcl-cvs" "pgg" "rcirc" "reftex" "remember" "sasl" "sc" "semantic"
+    "ses" "sieve" "smtpmail" "speedbar" "srecode" "todo-mode" "tramp" "transient"
+    "url" "use-package" "vhdl-mode" "vip" "viper" "vtable" "widget" "wisent" "woman")
   "List of Emacs documents available.
 Taken from <https://www.gnu.org/software/emacs/manual/html_mono/.>")
 
-(defconst org-info-other-documents
+(defcustom org-info-other-documents
   '(("dir" . "https://www.gnu.org/manual/manual.html") ; index
     ("libc" . "https://www.gnu.org/software/libc/manual/html_mono/libc.html")
     ("make" . "https://www.gnu.org/software/make/manual/make.html"))
   "Alist of documents generated from Texinfo source.
 When converting info links to HTML, links to any one of these manuals are
-converted to use these URL.")
+converted to use these URL."
+  :group 'org-link
+  :type '(alist :key-type string :value-type string)
+  :package-version '(Org . "9.7")
+  :safe #'listp)
 
 (defun org-info-map-html-url (filename)
   "Return URL or HTML file associated to Info FILENAME.
@@ -151,11 +157,11 @@ If FILENAME refers to an official GNU document, return a URL pointing to
 the official page for that document, e.g., use \"gnu.org\" for all Emacs
 related documents.  Otherwise, append \".html\" extension to FILENAME.
 See `org-info-emacs-documents' and `org-info-other-documents' for details."
-  (cond ((member filename org-info-emacs-documents)
-	 (format "https://www.gnu.org/software/emacs/manual/html_mono/%s.html"
-		 filename))
-	((cdr (assoc filename org-info-other-documents)))
-	(t (concat filename ".html"))))
+  (cond ((cdr (assoc filename org-info-other-documents)))
+        ((member filename org-info-emacs-documents)
+         (format "https://www.gnu.org/software/emacs/manual/html_mono/%s.html"
+	         filename))
+        (t (concat filename ".html"))))
 
 (defun org-info--expand-node-name (node)
   "Expand Info NODE to HTML cross reference."
